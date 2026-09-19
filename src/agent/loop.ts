@@ -68,6 +68,8 @@ import { isIdleOnlyTool } from "./idle-only-tools.js";
 import {
   claimNextOwnerMessage,
   isAutonomyPaused,
+  isChildCreationPaused,
+  isSpendingPaused,
   markOwnerMessageProcessed,
   resetOwnerMessage,
   type OwnerMessage,
@@ -228,6 +230,11 @@ export async function runAgentLoop(
         config: {
           ...config,
           spawnAgent: async (task: any) => {
+            if (isChildCreationPaused(db.raw)) {
+              logger.warn("Owner control blocks worker/child creation", { taskId: task.id });
+              return null;
+            }
+
             // Try Conway sandbox spawn first (production)
             try {
               const { generateGenesisConfig } = await import("../replication/genesis.js");
@@ -253,7 +260,7 @@ export async function runAgentLoop(
               const is402 = sandboxError?.status === 402 ||
                 sandboxError?.message?.includes("INSUFFICIENT_CREDITS");
 
-              if (is402) {
+              if (is402 && !isSpendingPaused(db.raw)) {
                 const SANDBOX_TOPUP_COOLDOWN_MS = 60_000;
                 const lastAttempt = db.getKV("last_sandbox_topup_attempt");
                 const cooldownExpired = !lastAttempt ||
@@ -467,7 +474,7 @@ export async function runAgentLoop(
         // available, buy credits NOW — before attempting inference.
         // This prevents the agent from dying mid-loop while waiting for
         // the heartbeat to fire. Uses a 60s cooldown to avoid hammering.
-        if ((tier === "critical" || tier === "low_compute") && financial.usdcBalance >= 5) {
+        if (!isSpendingPaused(db.raw) && (tier === "critical" || tier === "low_compute") && financial.usdcBalance >= 5) {
           const INLINE_TOPUP_COOLDOWN_MS = 60_000;
           const lastInlineTopup = db.getKV("last_inline_topup_attempt");
           const cooldownExpired = !lastInlineTopup ||

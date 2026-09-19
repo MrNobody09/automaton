@@ -36,7 +36,7 @@ import { prettySink } from "./observability/pretty-sink.js";
 import { bootstrapTopup } from "./conway/topup.js";
 import { randomUUID } from "crypto";
 import { createOwnerControlServer } from "./control/server.js";
-import { initializeOwnerControlSchema, isAutonomyPaused } from "./control/state.js";
+import { initializeOwnerControlSchema, isAutonomyPaused, isSpendingPaused } from "./control/state.js";
 import { initializeOwnerApprovalSchema } from "./control/approvals.js";
 import { keccak256, toHex } from "viem";
 
@@ -342,8 +342,11 @@ async function run(): Promise<void> {
   }
 
   // Bootstrap topup: buy minimum credits ($5) from USDC so the agent can start.
-  // The agent decides larger topups itself via the topup_credits tool.
+  // Owner spending pause is authoritative across restarts.
   try {
+    if (isSpendingPaused(db.raw)) {
+      logger.warn("Bootstrap topup skipped: owner spending pause is enabled.");
+    } else {
     let bootstrapTimer: ReturnType<typeof setTimeout>;
     const bootstrapTimeout = new Promise<null>((_, reject) => {
       bootstrapTimer = setTimeout(() => reject(new Error("bootstrap topup timed out")), 15_000);
@@ -368,6 +371,7 @@ async function run(): Promise<void> {
       ]);
     } finally {
       clearTimeout(bootstrapTimer!);
+    }
     }
   } catch (err: any) {
     logger.warn(`[${new Date().toISOString()}] Bootstrap topup skipped: ${err.message}`);
