@@ -21,6 +21,7 @@ import {
 import { createOwnerControlRules } from "../agent/policy-rules/owner-controls.js";
 import { spawnChild } from "../replication/spawn.js";
 import { createOwnerControlServer } from "../control/server.js";
+import { BUILTIN_TASKS } from "../heartbeat/tasks.js";
 
 const tempDirs: string[] = [];
 const servers: Array<ReturnType<typeof createOwnerControlServer>> = [];
@@ -143,6 +144,30 @@ describe("owner emergency policy", () => {
     expect(
       rule.evaluate(request(db, { name: "get_trading_risk", category: "financial", riskLevel: "safe" })),
     ).toBeNull();
+    db.close();
+  });
+
+  it("prevents heartbeat auto-topup while spending is paused", async () => {
+    const db = makeDb();
+    updateOwnerControlFlags(db.raw, { spendingPaused: true });
+
+    const result = await BUILTIN_TASKS.check_usdc_balance(
+      {
+        timestamp: new Date().toISOString(),
+        creditBalance: 0,
+        usdcBalance: 100,
+        survivalTier: "critical",
+      } as any,
+      {
+        db,
+        config: { conwayApiUrl: "https://example.invalid" },
+        identity: { account: {}, chainType: "evm" },
+        conway: {},
+      } as any,
+    );
+
+    expect(result.shouldWake).toBe(false);
+    expect(db.getKV("last_auto_topup_attempt")).toBeUndefined();
     db.close();
   });
 });
