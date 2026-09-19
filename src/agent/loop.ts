@@ -65,6 +65,13 @@ import { createWorkerInferenceBridge } from "./worker-inference-bridge.js";
 import { ProviderRegistry } from "../inference/provider-registry.js";
 import { UnifiedInferenceClient } from "../inference/inference-client.js";
 import { isIdleOnlyTool } from "./idle-only-tools.js";
+import {
+  claimNextOwnerMessage,
+  isAutonomyPaused,
+  markOwnerMessageProcessed,
+  resetOwnerMessage,
+  type OwnerMessage,
+} from "../control/state.js";
 
 const logger = createLogger("loop");
 const MAX_TOOL_CALLS_PER_TURN = 10;
@@ -234,7 +241,7 @@ export async function runAgentLoop(
               });
 
               const lifecycle = new ChildLifecycle(db.raw);
-              const child = await spawnChild(conway, identity, db, genesis, lifecycle);
+              const child = await spawnChild(conway, identity, db, genesis, lifecycle, config);
 
               return {
                 address: child.address,
@@ -279,7 +286,7 @@ export async function runAgentLoop(
                           specialization: `${retryRole}: ${task.title}`,
                         });
                         const retryLifecycle = new RetryLifecycle(db.raw);
-                        const child = await retrySpawn(conway, identity, db, retryGenesis, retryLifecycle);
+                        const child = await retrySpawn(conway, identity, db, retryGenesis, retryLifecycle, config);
                         return {
                           address: child.address,
                           name: child.name,
@@ -393,8 +400,17 @@ export async function runAgentLoop(
   while (running) {
     // Declared outside try so the catch block can access for retry/failure handling
     let claimedMessages: InboxMessageRow[] = [];
+    let claimedOwnerMessage: OwnerMessage | undefined;
 
     try {
+      if (isAutonomyPaused(db.raw)) {
+        log(config, "[OWNER CONTROL] Autonomy paused by owner.");
+        db.setAgentState("sleeping");
+        onStateChange?.("sleeping");
+        running = false;
+        break;
+      }
+
       // Check if we should be sleeping
       const sleepUntil = db.getKV("sleep_until");
       if (sleepUntil && new Date(sleepUntil) > new Date()) {
@@ -404,6 +420,16 @@ export async function runAgentLoop(
         onStateChange?.("sleeping");
         running = false;
         break;
+      }
+
+      if (!pendingInput) {
+        claimedOwnerMessage = claimNextOwnerMessage(db.raw);
+        if (claimedOwnerMessage) {
+          pendingInput = {
+            content: `[Owner instruction]: ${claimedOwnerMessage.content}`,
+            source: "creator",
+          };
+        }
       }
 
       // Check for unprocessed inbox messages using the state machine:
@@ -695,6 +721,9 @@ export async function runAgentLoop(
         if (claimedIds.length > 0) {
           markInboxProcessed(db.raw, claimedIds);
         }
+        if (claimedOwnerMessage) {
+          markOwnerMessageProcessed(db.raw, claimedOwnerMessage.id);
+        }
       });
       onTurnComplete?.(turn);
 
@@ -899,6 +928,10 @@ export async function runAgentLoop(
     } catch (err: any) {
       consecutiveErrors++;
       log(config, `[ERROR] Turn failed: ${err.message}`);
+
+      if (claimedOwnerMessage) {
+        resetOwnerMessage(db.raw, claimedOwnerMessage.id, err.message || String(err));
+      }
 
       // Handle inbox message state on turn failure:
       // Messages that have retries remaining go back to 'received';

@@ -35,6 +35,9 @@ import { createLogger, setGlobalLogLevel, StructuredLogger } from "./observabili
 import { prettySink } from "./observability/pretty-sink.js";
 import { bootstrapTopup } from "./conway/topup.js";
 import { randomUUID } from "crypto";
+import { createOwnerControlServer } from "./control/server.js";
+import { initializeOwnerControlSchema, isAutonomyPaused } from "./control/state.js";
+import { initializeOwnerApprovalSchema } from "./control/approvals.js";
 import { keccak256, toHex } from "viem";
 
 const logger = createLogger("main");
@@ -151,6 +154,8 @@ async function showStatus(): Promise<void> {
 
   const dbPath = resolvePath(config.dbPath);
   const db = createDatabase(dbPath);
+  initializeOwnerControlSchema(db.raw);
+  initializeOwnerApprovalSchema(db.raw);
 
   const state = db.getAgentState();
   const turnCount = db.getTurnCount();
@@ -387,10 +392,25 @@ async function run(): Promise<void> {
   heartbeat.start();
   logger.info(`[${new Date().toISOString()}] Heartbeat daemon started.`);
 
+  let ownerControlServer: ReturnType<typeof createOwnerControlServer> | undefined;
+  const ownerControlToken = process.env.OWNER_CONTROL_TOKEN;
+  if (ownerControlToken) {
+    const host = process.env.OWNER_CONTROL_HOST || "127.0.0.1";
+    const parsedPort = Number(process.env.OWNER_CONTROL_PORT || "8787");
+    const port = Number.isInteger(parsedPort) && parsedPort > 0 && parsedPort <= 65535
+      ? parsedPort
+      : 8787;
+    ownerControlServer = createOwnerControlServer({ db, config, token: ownerControlToken, host, port });
+    logger.info(`[${new Date().toISOString()}] Owner control plane listening on ${host}:${port}`);
+  } else {
+    logger.warn("OWNER_CONTROL_TOKEN is not set; owner control plane is disabled.");
+  }
+
   // Handle graceful shutdown
   const shutdown = () => {
     logger.info(`[${new Date().toISOString()}] Shutting down...`);
     heartbeat.stop();
+    ownerControlServer?.close();
     db.setAgentState("sleeping");
     db.close();
     process.exit(0);
@@ -405,6 +425,12 @@ async function run(): Promise<void> {
 
   while (true) {
     try {
+      if (isAutonomyPaused(db.raw)) {
+        if (db.getAgentState() !== "sleeping") db.setAgentState("sleeping");
+        await sleep(5_000);
+        continue;
+      }
+
       // Reload skills (may have changed since last loop)
       try {
         skills = loadSkills(skillsDir, db);
