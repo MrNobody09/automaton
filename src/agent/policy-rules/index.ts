@@ -14,6 +14,7 @@ import { createFinancialRules } from "./financial.js";
 import { createAuthorityRules } from "./authority.js";
 import { createRateLimitRules } from "./rate-limits.js";
 import { createEthicalRevenueRules } from "./ethical-revenue.js";
+import { createOwnerControlRules } from "./owner-controls.js";
 
 /**
  * Create the default set of policy rules.
@@ -24,6 +25,7 @@ export function createDefaultRules(
 ): PolicyRule[] {
   return [
     ...createEthicalRevenueRules(),
+    ...createOwnerControlRules(),
     ...createValidationRules(),
     ...createCommandSafetyRules(),
     ...createPathProtectionRules(),
