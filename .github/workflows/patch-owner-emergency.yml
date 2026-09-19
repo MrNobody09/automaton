@@ -1,0 +1,93 @@
+name: Apply owner emergency enforcement patch
+
+on:
+  push:
+    branches: [feat/owner-control-plane]
+    paths: [.github/workflows/patch-owner-emergency.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/owner-control-plane
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Apply emergency-control enforcement
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if new in text:
+                  return
+              if old not in text:
+                  raise SystemExit(f"expected patch target not found in {path}: {old[:120]!r}")
+              p.write_text(text.replace(old, new, 1))
+
+          # Agent loop: spend pause + all child/worker creation pause.
+          replace_once(
+              "src/agent/loop.ts",
+              '''  isAutonomyPaused,\n  markOwnerMessageProcessed,''',
+              '''  isAutonomyPaused,\n  isChildCreationPaused,\n  isSpendingPaused,\n  markOwnerMessageProcessed,''',
+          )
+          replace_once(
+              "src/agent/loop.ts",
+              '''          spawnAgent: async (task: any) => {\n            // Try Conway sandbox spawn first (production)''',
+              '''          spawnAgent: async (task: any) => {\n            if (isChildCreationPaused(db.raw)) {\n              logger.warn("Owner control blocks worker/child creation", { taskId: task.id });\n              return null;\n            }\n\n            // Try Conway sandbox spawn first (production)''',
+          )
+          replace_once(
+              "src/agent/loop.ts",
+              '''            if (is402) {\n              const SANDBOX_TOPUP_COOLDOWN_MS = 60_000;''',
+              '''            if (is402 && !isSpendingPaused(db.raw)) {\n              const SANDBOX_TOPUP_COOLDOWN_MS = 60_000;''',
+          )
+          replace_once(
+              "src/agent/loop.ts",
+              '''        if ((tier === "critical" || tier === "low_compute") && financial.usdcBalance >= 5) {''',
+              '''        if (!isSpendingPaused(db.raw) && (tier === "critical" || tier === "low_compute") && financial.usdcBalance >= 5) {''',
+          )
+
+          # Main startup bootstrap must obey persisted spend pause before any auto-payment.
+          replace_once(
+              "src/index.ts",
+              '''import { initializeOwnerControlSchema, isAutonomyPaused } from "./control/state.js";''',
+              '''import { initializeOwnerControlSchema, isAutonomyPaused, isSpendingPaused } from "./control/state.js";''',
+          )
+          replace_once(
+              "src/index.ts",
+              '''  // Bootstrap topup: buy minimum credits ($5) from USDC so the agent can start.\n  // The agent decides larger topups itself via the topup_credits tool.\n  try {''',
+              '''  // Bootstrap topup: buy minimum credits ($5) from USDC so the agent can start.\n  // Owner spending pause is authoritative across restarts.\n  try {\n    if (isSpendingPaused(db.raw)) {\n      logger.warn("Bootstrap topup skipped: owner spending pause is enabled.");\n    } else {''',
+          )
+          replace_once(
+              "src/index.ts",
+              '''    } finally {\n      clearTimeout(bootstrapTimer!);\n    }\n  } catch (err: any) {\n    logger.warn(`[${new Date().toISOString()}] Bootstrap topup skipped: ${err.message}`);\n  }''',
+              '''    } finally {\n      clearTimeout(bootstrapTimer!);\n    }\n    }\n  } catch (err: any) {\n    logger.warn(`[${new Date().toISOString()}] Bootstrap topup skipped: ${err.message}`);\n  }''',
+          )
+
+          # Heartbeat auto-topup must obey spend pause even while the agent sleeps.
+          replace_once(
+              "src/heartbeat/tasks.ts",
+              '''import { metricsInsertSnapshot, metricsPruneOld } from "../state/database.js";''',
+              '''import { metricsInsertSnapshot, metricsPruneOld } from "../state/database.js";\nimport { isSpendingPaused } from "../control/state.js";''',
+          )
+          replace_once(
+              "src/heartbeat/tasks.ts",
+              '''    const MIN_TOPUP_USD = 5;\n    if (balance >= MIN_TOPUP_USD && (ctx.survivalTier === "critical" || ctx.survivalTier === "dead")) {''',
+              '''    const MIN_TOPUP_USD = 5;\n    if (isSpendingPaused(taskCtx.db.raw)) {\n      return { shouldWake: false };\n    }\n    if (balance >= MIN_TOPUP_USD && (ctx.survivalTier === "critical" || ctx.survivalTier === "dead")) {''',
+          )
+          PY
+      - name: Commit emergency enforcement
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/agent/loop.ts src/index.ts src/heartbeat/tasks.ts
+          git commit -m "fix: enforce owner emergency controls across autonomous paths"
+          git push
