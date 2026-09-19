@@ -37,6 +37,21 @@ function filePermissionsArePrivate(filePath: string): boolean {
   return (mode & 0o077) === 0;
 }
 
+function checkPrivateFile(checks: ProductionHealthCheck[], name: string, filePath: string, required: boolean): void {
+  if (!fs.existsSync(filePath)) {
+    checks.push({ name, ok: !required, detail: required ? `${path.basename(filePath)} is missing` : `${path.basename(filePath)} not present` });
+    return;
+  }
+  const ok = filePermissionsArePrivate(filePath);
+  checks.push({
+    name,
+    ok,
+    detail: ok
+      ? `${path.basename(filePath)} has private permissions`
+      : `${path.basename(filePath)} must not be readable or writable by group/other users`,
+  });
+}
+
 export function runProductionHealth(options: ProductionHealthOptions = {}): ProductionHealthResult {
   const stateDir = options.stateDir ?? process.env.AUTOMATON_STATE_DIR ?? path.join(os.homedir(), ".automaton");
   const checks: ProductionHealthCheck[] = [];
@@ -54,21 +69,9 @@ export function runProductionHealth(options: ProductionHealthOptions = {}): Prod
       detail: `automaton.json unavailable or invalid: ${error instanceof Error ? error.message : String(error)}`,
     });
   }
-
-  const walletPath = path.join(stateDir, "wallet.json");
-  try {
-    if (!fs.existsSync(walletPath)) throw new Error("wallet.json is missing");
-    if (!filePermissionsArePrivate(walletPath)) {
-      throw new Error("wallet.json must not be readable or writable by group/other users");
-    }
-    checks.push({ name: "wallet", ok: true, detail: "wallet.json exists with private permissions" });
-  } catch (error) {
-    checks.push({
-      name: "wallet",
-      ok: false,
-      detail: error instanceof Error ? error.message : String(error),
-    });
-  }
+  checkPrivateFile(checks, "config_permissions", configPath, true);
+  checkPrivateFile(checks, "provisioned_api_key_permissions", path.join(stateDir, "config.json"), false);
+  checkPrivateFile(checks, "wallet", path.join(stateDir, "wallet.json"), true);
 
   const configuredDbPath = typeof config?.dbPath === "string" ? config.dbPath : undefined;
   const dbPath = resolveStatePath(configuredDbPath, stateDir, "state.db");
@@ -98,10 +101,11 @@ export function runProductionHealth(options: ProductionHealthOptions = {}): Prod
     stateDir,
     "heartbeat.yml",
   );
+  const heartbeatPresent = fs.existsSync(heartbeatPath);
   checks.push({
     name: "heartbeat_config",
-    ok: fs.existsSync(heartbeatPath),
-    detail: fs.existsSync(heartbeatPath) ? "heartbeat configuration is present" : `heartbeat configuration is missing at ${heartbeatPath}`,
+    ok: heartbeatPresent,
+    detail: heartbeatPresent ? "heartbeat configuration is present" : `heartbeat configuration is missing at ${heartbeatPath}`,
   });
 
   return {
