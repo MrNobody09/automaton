@@ -16,24 +16,53 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run typecheck
       - run: pnpm run build
+      - name: Run opportunity acquisition regression tests
+        run: pnpm exec vitest run src/__tests__/opportunity-acquisition.test.ts --reporter=verbose
       - name: Run tests
         timeout-minutes: 10
         run: |
           set +e
-          timeout 300 pnpm test
-          RC=$?
+          timeout 300 pnpm test 2>&1 | tee /tmp/vitest-full.log
+          RC=${PIPESTATUS[0]}
           set -e
-          # Exit code 124 means timeout killed the process (vitest hung after tests completed)
-          if [ $RC -eq 124 ]; then echo "::warning::vitest process hung after tests, killed by timeout"; exit 0; fi
+
+          # A known open-handle issue can keep Vitest alive after it has printed its
+          # final summary. Never allow that timeout to hide an actual failed suite.
+          if grep -Eq '(Test Files|Tests)[[:space:]].*[1-9][0-9]* failed' /tmp/vitest-full.log; then
+            echo "::error::Vitest reported one or more failed tests"
+            exit 1
+          fi
+
+          if [ $RC -eq 124 ]; then
+            if ! grep -Eq 'Tests[[:space:]]+[0-9]+ passed' /tmp/vitest-full.log; then
+              echo "::error::Vitest timed out before reporting a passing test summary"
+              exit 1
+            fi
+            echo "::warning::vitest process hung after tests, killed by timeout"
+            exit 0
+          fi
           exit $RC
       - name: Run security tests
         timeout-minutes: 10
         run: |
           set +e
-          timeout 180 pnpm test -- --grep "security|injection|policy|financial"
-          RC=$?
+          timeout 180 pnpm test -- --grep "security|injection|policy|financial" 2>&1 | tee /tmp/vitest-security.log
+          RC=${PIPESTATUS[0]}
           set -e
-          if [ $RC -eq 124 ]; then echo "::warning::vitest process hung after tests, killed by timeout"; exit 0; fi
+
+          if grep -Eq '(Test Files|Tests)[[:space:]].*[1-9][0-9]* failed' /tmp/vitest-security.log; then
+            echo "::error::Vitest reported one or more failed security tests"
+            exit 1
+          fi
+
+          if [ $RC -eq 124 ]; then
+            if ! grep -Eq 'Tests[[:space:]]+[0-9]+ passed' /tmp/vitest-security.log; then
+              echo "::error::Security tests timed out before reporting a passing test summary"
+              exit 1
+            fi
+            echo "::warning::vitest process hung after tests, killed by timeout"
+            exit 0
+          fi
           exit $RC
 
   security-audit:
