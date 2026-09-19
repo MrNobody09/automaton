@@ -1,0 +1,69 @@
+name: Apply final owner control hardening
+
+on:
+  push:
+    branches: [feat/owner-control-plane]
+    paths: [.github/workflows/patch-owner-final.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/owner-control-plane
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Apply final hardening
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if new in text:
+                  return
+              if old not in text:
+                  raise SystemExit(f"expected patch target not found in {path}: {old[:140]!r}")
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              "src/agent/loop.ts",
+              '''              // Conway sandbox unavailable — fall back to local worker\n              logger.info("Conway sandbox unavailable, spawning local worker", {''',
+              '''              if (isChildCreationPaused(db.raw)) {\n                logger.warn("Owner control blocked local worker fallback", { taskId: task.id });\n                return null;\n              }\n\n              // Conway sandbox unavailable — fall back to local worker\n              logger.info("Conway sandbox unavailable, spawning local worker", {''',
+          )
+
+          # Initialize control schemas during normal runtime startup, regardless of whether
+          # the HTTP control server is enabled.
+          p = Path("src/index.ts")
+          text = p.read_text()
+          needle = '''  // Initialize database\n  const dbPath = resolvePath(config.dbPath);\n  const db = createDatabase(dbPath);'''
+          replacement = '''  // Initialize database\n  const dbPath = resolvePath(config.dbPath);\n  const db = createDatabase(dbPath);\n  initializeOwnerControlSchema(db.raw);\n  initializeOwnerApprovalSchema(db.raw);'''
+          first = text.find(needle)
+          if first == -1:
+              if replacement not in text:
+                  raise SystemExit("runtime database initialization target not found")
+          else:
+              # The status command has a similar block earlier; target the occurrence after run() starts.
+              run_pos = text.find("async function run(): Promise<void>")
+              target = text.find(needle, run_pos)
+              if target == -1:
+                  if replacement not in text[run_pos:]:
+                      raise SystemExit("run() database initialization target not found")
+              else:
+                  text = text[:target] + text[target:].replace(needle, replacement, 1)
+                  p.write_text(text)
+          PY
+      - name: Commit final hardening
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/agent/loop.ts src/index.ts
+          git commit -m "fix: close owner control runtime gaps"
+          git push
