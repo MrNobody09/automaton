@@ -1,4 +1,4 @@
-name: Apply acquisition hardening patch
+name: Refine acquisition sanitization patch
 
 on:
   push:
@@ -19,60 +19,23 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
-      - name: Apply acquisition hardening
+      - name: Refine marketplace text handling
         run: |
           python - <<'PY'
           from pathlib import Path
-
-          def replace_once(path, old, new):
-              p = Path(path)
-              text = p.read_text()
-              if new in text:
-                  return
+          p = Path("src/business/acquisition.ts")
+          text = p.read_text()
+          old = '''function cleanExternalText(value: unknown, maxLength: number, source: string): string {\n  if (value === null || value === undefined) return "";\n  const raw = String(value);\n  const sanitized = sanitizeInput(raw, source, "social_message");\n  if (sanitized.blocked) return "[External content blocked by injection defense]";\n  return sanitizeToolResult(sanitized.content, maxLength).trim();\n}\n'''
+          new = '''function cleanExternalText(value: unknown, maxLength: number, source: string): string {\n  if (value === null || value === undefined) return "";\n  const raw = String(value);\n  const sanitized = sanitizeInput(raw, source, "social_message");\n  if (sanitized.blocked || sanitized.threatLevel !== "low") {\n    return "[External content blocked by injection defense]";\n  }\n  return sanitizeToolResult(raw, maxLength).trim();\n}\n'''
+          if new not in text:
               if old not in text:
-                  raise SystemExit(f"expected patch target not found in {path}: {old[:140]!r}")
+                  raise SystemExit("cleanExternalText target not found")
               p.write_text(text.replace(old, new, 1))
-
-          replace_once(
-              "src/business/acquisition.ts",
-              'import { sanitizeToolResult } from "../agent/injection-defense.js";',
-              'import { sanitizeInput, sanitizeToolResult } from "../agent/injection-defense.js";',
-          )
-
-          replace_once(
-              "src/business/acquisition.ts",
-              '''    const externalId = cleanText(task.chainTaskId ?? task.chain_task_id ?? task.id ?? "", 128);\n    const title = cleanText(task.title ?? task.name ?? `0xWork task ${externalId}`, 500);\n    if (!externalId || !title) continue;\n\n    const description = cleanText(task.description ?? task.details ?? task.body ?? "", MAX_DESCRIPTION_CHARS);''',
-              '''    const externalId = cleanText(task.chainTaskId ?? task.chain_task_id ?? task.id ?? "", 128);\n    const externalSource = `0xwork-${createFingerprint(externalId || "unknown").slice(0, 16)}`;\n    const title = cleanExternalText(task.title ?? task.name ?? `0xWork task ${externalId}`, 500, externalSource);\n    if (!externalId || !title) continue;\n\n    const description = cleanExternalText(task.description ?? task.details ?? task.body ?? "", MAX_DESCRIPTION_CHARS, externalSource);''',
-          )
-
-          replace_once(
-              "src/business/acquisition.ts",
-              '''      const title = cleanText(issue.title ?? "", 500);\n      const body = cleanText(issue.body ?? "", MAX_DESCRIPTION_CHARS);''',
-              '''      const externalSource = `github-${createFingerprint(`${repository}#${number}`).slice(0, 16)}`;\n      const title = cleanExternalText(issue.title ?? "", 500, externalSource);\n      const body = cleanExternalText(issue.body ?? "", MAX_DESCRIPTION_CHARS, externalSource);''',
-          )
-
-          replace_once(
-              "src/business/acquisition.ts",
-              '''function cleanText(value: unknown, maxLength: number): string {\n  if (value === null || value === undefined) return "";\n  return sanitizeToolResult(String(value), maxLength).trim();\n}\n''',
-              '''function cleanExternalText(value: unknown, maxLength: number, source: string): string {\n  if (value === null || value === undefined) return "";\n  const raw = String(value);\n  const sanitized = sanitizeInput(raw, source, "social_message");\n  if (sanitized.blocked) return "[External content blocked by injection defense]";\n  return sanitizeToolResult(sanitized.content, maxLength).trim();\n}\n\nfunction cleanText(value: unknown, maxLength: number): string {\n  if (value === null || value === undefined) return "";\n  return sanitizeToolResult(String(value), maxLength).trim();\n}\n''',
-          )
-
-          replace_once(
-              "src/business/acquisition.ts",
-              '''  return encoded.length <= maxLength ? encoded : encoded.slice(0, maxLength);''',
-              '''  if (encoded.length <= maxLength) return encoded;\n  const previewLength = Math.max(256, Math.floor(maxLength / 2));\n  return JSON.stringify({ truncated: true, preview: encoded.slice(0, previewLength) });''',
-          )
-
-          replace_once(
-              "src/business/intelligence.ts",
-              '''  assertUnitInterval(merged.riskScore!, "riskScore");\n  assertUnitInterval(merged.learningValue!, "learningValue");\n\n  db.prepare(`''',
-              '''  assertUnitInterval(merged.riskScore!, "riskScore");\n  assertUnitInterval(merged.learningValue!, "learningValue");\n  if (!Number.isInteger(merged.timeToRevenueDays) || merged.timeToRevenueDays! < 0) {\n    throw new Error("timeToRevenueDays must be a non-negative integer");\n  }\n\n  db.prepare(`''',
-          )
           PY
-      - name: Commit acquisition hardening
+      - name: Commit sanitization refinement
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/business/acquisition.ts src/business/intelligence.ts
-          git commit -m "fix: harden opportunity acquisition inputs"
+          git add src/business/acquisition.ts
+          git commit -m "fix: preserve safe marketplace text" || exit 0
           git push
