@@ -55,6 +55,12 @@ const DEFAULT_HEARTBEAT_CONFIG: HeartbeatConfig = {
       task: "check_social_inbox",
       enabled: true,
     },
+    {
+      name: "business_review",
+      schedule: "17 */6 * * *",
+      task: "business_review",
+      enabled: true,
+    },
   ],
   defaultIntervalMs: 60_000,
   lowComputeMultiplier: 4,
@@ -95,7 +101,6 @@ export function loadHeartbeatConfig(configPath?: string): HeartbeatConfig {
     };
   } catch (error: any) {
     logger.error("Failed to parse YAML config", error instanceof Error ? error : undefined);
-    // Continue with defaults, but log the error
     return DEFAULT_HEARTBEAT_CONFIG;
   }
 }

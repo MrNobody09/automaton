@@ -22,6 +22,7 @@ import type {
   SocialClientInterface,
 } from "../types.js";
 import { BUILTIN_TASKS } from "./tasks.js";
+import { BUSINESS_REVIEW_TASK_NAME, businessReviewTask } from "./business-task.js";
 import { DurableScheduler } from "./scheduler.js";
 import { upsertHeartbeatSchedule } from "../state/database.js";
 import type BetterSqlite3 from "better-sqlite3";
@@ -70,11 +71,12 @@ export function createHeartbeatDaemon(
     social,
   };
 
-  // Build task map from BUILTIN_TASKS
+  // Build task map from built-in tasks plus business runtime tasks.
   const taskMap = new Map<string, HeartbeatTaskFn>();
   for (const [name, fn] of Object.entries(BUILTIN_TASKS)) {
     taskMap.set(name, fn);
   }
+  taskMap.set(BUSINESS_REVIEW_TASK_NAME, businessReviewTask);
 
   // Seed heartbeat_schedule from config entries if not already present
   for (const entry of heartbeatConfig.entries) {
