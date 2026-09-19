@@ -315,6 +315,11 @@ export async function runAgentLoop(
                 }
               }
 
+              if (isChildCreationPaused(db.raw)) {
+                logger.warn("Owner control blocked local worker fallback", { taskId: task.id });
+                return null;
+              }
+
               // Conway sandbox unavailable — fall back to local worker
               logger.info("Conway sandbox unavailable, spawning local worker", {
                 taskId: task.id,

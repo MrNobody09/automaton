@@ -210,6 +210,8 @@ async function run(): Promise<void> {
   // Initialize database
   const dbPath = resolvePath(config.dbPath);
   const db = createDatabase(dbPath);
+  initializeOwnerControlSchema(db.raw);
+  initializeOwnerApprovalSchema(db.raw);
 
   // Persist createdAt: only set if not already stored (never overwrite)
   const existingCreatedAt = db.getIdentity("createdAt");
