@@ -781,8 +781,10 @@ function cleanExternalText(value: unknown, maxLength: number, source: string): s
   if (value === null || value === undefined) return "";
   const raw = String(value);
   const sanitized = sanitizeInput(raw, source, "social_message");
-  if (sanitized.blocked) return "[External content blocked by injection defense]";
-  return sanitizeToolResult(sanitized.content, maxLength).trim();
+  if (sanitized.blocked || sanitized.threatLevel !== "low") {
+    return "[External content blocked by injection defense]";
+  }
+  return sanitizeToolResult(raw, maxLength).trim();
 }
 
 function cleanText(value: unknown, maxLength: number): string {
