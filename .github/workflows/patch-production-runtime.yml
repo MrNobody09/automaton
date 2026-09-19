@@ -1,0 +1,103 @@
+name: Apply production runtime integration patch
+
+on:
+  push:
+    branches: [feat/production-runtime-foundation]
+    paths: [.github/workflows/patch-production-runtime.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/production-runtime-foundation
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Apply source patches
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json
+
+          def replace(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if old not in text:
+                  raise SystemExit(f"expected patch target not found in {path}")
+              p.write_text(text.replace(old, new))
+
+          # Preserve category/risk metadata when business tools are installed.
+          replace(
+              "scripts/register-business-tools.ts",
+              "        parameters: tool.parameters,\n",
+              "        parameters: tool.parameters,\n        category: tool.category,\n        riskLevel: tool.riskLevel,\n",
+          )
+
+          replace(
+              "src/agent/tools.ts",
+              '''    return installed.map((tool) => ({\n      name: tool.name,\n      description: `Installed tool: ${tool.name}`,\n      category: (tool.type === "mcp" ? "conway" : "vm") as ToolCategory,\n      riskLevel: "caution" as RiskLevel,\n      parameters: (tool.config?.parameters as Record<string, unknown>) || {\n        type: "object",\n        properties: {},\n      },\n      execute: createInstalledToolExecutor(tool),\n    }));''',
+              '''    const validCategories = new Set<string>([\n      "vm", "conway", "self_mod", "financial", "survival", "skills",\n      "git", "registry", "replication", "memory",\n    ]);\n    const validRiskLevels = new Set<string>(["safe", "caution", "dangerous"]);\n    return installed.map((tool) => {\n      const configuredCategory = tool.config?.category;\n      const configuredRisk = tool.config?.riskLevel;\n      const category = typeof configuredCategory === "string" && validCategories.has(configuredCategory)\n        ? configuredCategory as ToolCategory\n        : (tool.type === "mcp" ? "conway" : "vm") as ToolCategory;\n      const riskLevel = typeof configuredRisk === "string" && validRiskLevels.has(configuredRisk)\n        ? configuredRisk as RiskLevel\n        : "caution" as RiskLevel;\n      return {\n        name: tool.name,\n        description: `Installed tool: ${tool.name}`,\n        category,\n        riskLevel,\n        parameters: (tool.config?.parameters as Record<string, unknown>) || {\n          type: "object",\n          properties: {},\n        },\n        execute: createInstalledToolExecutor(tool),\n      };\n    });''',
+          )
+
+          # Make replication limits use runtime config instead of an unattached db.config property.
+          replace(
+              "src/replication/spawn.ts",
+              '''/**\n * Spawn a child automaton in a new Conway sandbox using lifecycle state machine.\n */\nexport async function spawnChild(''',
+              '''export function assertChildCapacity(\n  children: Array<Pick<ChildAutomaton, "status">>,\n  maxChildren: number,\n): void {\n  if (!Number.isInteger(maxChildren) || maxChildren < 0) {\n    throw new Error(`Invalid maxChildren configuration: ${maxChildren}`);\n  }\n  const active = children.filter(\n    (c) => c.status !== "dead" && c.status !== "cleaned_up" && c.status !== "failed",\n  );\n  if (active.length >= maxChildren) {\n    throw new Error(\n      `Cannot spawn: already at max children (${maxChildren}). Kill or wait for existing children to die.`,\n    );\n  }\n}\n\n/**\n * Spawn a child automaton in a new Conway sandbox using lifecycle state machine.\n */\nexport async function spawnChild(''',
+          )
+          replace(
+              "src/replication/spawn.ts",
+              '''  genesis: GenesisConfig,\n  lifecycle?: ChildLifecycle,\n): Promise<ChildAutomaton> {\n  // Check child limit from config\n  const existing = db\n    .getChildren()\n    .filter(\n      (c) =>\n        c.status !== "dead" &&\n        c.status !== "cleaned_up" &&\n        c.status !== "failed",\n    );\n  const maxChildren = (db as any).config?.maxChildren ?? 3;\n  if (existing.length >= maxChildren) {\n    throw new Error(\n      `Cannot spawn: already at max children (${maxChildren}). Kill or wait for existing children to die.`,\n    );\n  }''',
+              '''  genesis: GenesisConfig,\n  lifecycle?: ChildLifecycle,\n  runtimeConfig?: Pick<AutomatonConfig, "maxChildren" | "childSandboxMemoryMb">,\n): Promise<ChildAutomaton> {\n  assertChildCapacity(db.getChildren(), runtimeConfig?.maxChildren ?? 3);''',
+          )
+          replace(
+              "src/replication/spawn.ts",
+              '''    return spawnChildLegacy(conway, identity, db, genesis, childId);''',
+              '''    return spawnChildLegacy(conway, identity, db, genesis, childId, runtimeConfig);''',
+          )
+          replace(
+              "src/replication/spawn.ts",
+              '''    const childMemoryMb = (db as any).config?.childSandboxMemoryMb ?? 1024;''',
+              '''    const childMemoryMb = runtimeConfig?.childSandboxMemoryMb ?? 1024;''',
+          )
+          replace(
+              "src/replication/spawn.ts",
+              '''  childId: string,\n): Promise<ChildAutomaton> {''',
+              '''  childId: string,\n  runtimeConfig?: Pick<AutomatonConfig, "maxChildren" | "childSandboxMemoryMb">,\n): Promise<ChildAutomaton> {''',
+          )
+          replace(
+              "src/replication/spawn.ts",
+              '''  const childMemoryMb = (db as any).config?.childSandboxMemoryMb ?? 1024;''',
+              '''  const childMemoryMb = runtimeConfig?.childSandboxMemoryMb ?? 1024;''',
+          )
+          replace(
+              "src/agent/tools.ts",
+              '''            genesis,\n            lifecycle,\n          );''',
+              '''            genesis,\n            lifecycle,\n            ctx.config,\n          );''',
+          )
+          replace(
+              "src/agent/tools.ts",
+              '''                  retryGenesis,\n                  retryLifecycle,\n                );''',
+              '''                  retryGenesis,\n                  retryLifecycle,\n                  ctx.config,\n                );''',
+          )
+
+          # Production CLI scripts.
+          package = json.loads(Path("package.json").read_text())
+          package["scripts"]["production:health"] = "node dist/production/health-cli.js"
+          package["scripts"]["production:backup"] = "node dist/production/backup-cli.js"
+          package["scripts"]["production:install"] = "bash scripts/install-production.sh"
+          Path("package.json").write_text(json.dumps(package, indent=2) + "\n")
+          PY
+      - name: Commit integration patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add scripts/register-business-tools.ts src/agent/tools.ts src/replication/spawn.ts package.json
+          git commit -m "feat: harden production runtime integration"
+          git push
