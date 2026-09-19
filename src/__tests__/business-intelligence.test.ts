@@ -1,3 +1,4 @@
+// Business-intelligence coverage also serves as the PR CI validation trigger.
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import {
