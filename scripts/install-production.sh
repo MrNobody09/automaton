@@ -10,6 +10,12 @@ APP_DIR="${AUTOMATON_APP_DIR:-/opt/automaton}"
 STATE_DIR="${AUTOMATON_STATE_DIR:-/root/.automaton}"
 BACKUP_DIR="${AUTOMATON_BACKUP_DIR:-/var/backups/automaton}"
 ENV_DIR="/etc/automaton"
+CURRENT_DIR="$(pwd -P)"
+
+if [[ "${CURRENT_DIR}" != "${APP_DIR}" ]]; then
+  echo "Production checkout must be deployed at ${APP_DIR}; current directory is ${CURRENT_DIR}." >&2
+  exit 1
+fi
 
 install -d -m 700 "${STATE_DIR}" "${BACKUP_DIR}" "${ENV_DIR}"
 
