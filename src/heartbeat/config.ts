@@ -56,6 +56,12 @@ const DEFAULT_HEARTBEAT_CONFIG: HeartbeatConfig = {
       enabled: true,
     },
     {
+      name: "opportunity_discovery",
+      schedule: "43 */6 * * *",
+      task: "opportunity_discovery",
+      enabled: true,
+    },
+    {
       name: "business_review",
       schedule: "17 */6 * * *",
       task: "business_review",
