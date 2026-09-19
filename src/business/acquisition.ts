@@ -835,15 +835,23 @@ function firstFiniteNumber(...values: unknown[]): number | null {
 }
 
 function parseUsdAmount(text: string, ceilingUsd: number): number | null {
+  const payoutContext = /\b(?:bounty|reward|payout|payment|compensation|prize|pays?|paid)\b/i;
+  const segments = text
+    .split(/\n+|(?<=[.!?])\s+/)
+    .map((segment) => segment.trim())
+    .filter((segment) => segment && payoutContext.test(segment));
   const matches: number[] = [];
   const patterns = [
     /\$\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/g,
     /\b([0-9][0-9,]*(?:\.[0-9]{1,2})?)\s*(?:USD|USDC)\b/gi,
   ];
-  for (const pattern of patterns) {
-    for (const match of text.matchAll(pattern)) {
-      const value = Number(match[1].replace(/,/g, ""));
-      if (Number.isFinite(value) && value > 0 && value <= ceilingUsd) matches.push(value);
+  for (const segment of segments) {
+    for (const pattern of patterns) {
+      pattern.lastIndex = 0;
+      for (const match of segment.matchAll(pattern)) {
+        const value = Number(match[1].replace(/,/g, ""));
+        if (Number.isFinite(value) && value > 0 && value <= ceilingUsd) matches.push(value);
+      }
     }
   }
   if (matches.length === 0) return null;

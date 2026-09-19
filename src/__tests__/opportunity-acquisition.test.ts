@@ -221,6 +221,39 @@ describe("GitHub opportunity acquisition", () => {
     db.close();
   });
 
+  it("does not mistake unrelated dollar amounts for bounty revenue", async () => {
+    const db = memoryDb();
+    configureOpportunitySource(db, {
+      id: "github-curated",
+      name: "Curated GitHub work",
+      type: "github_issues",
+      enabled: true,
+      config: { repositories: ["example/project"], labels: ["bounty"] },
+    });
+
+    await runOpportunityDiscovery(
+      db,
+      "github-curated",
+      mockFetch({
+        items: [
+          {
+            number: 8,
+            title: "Optimize hosted export worker",
+            body: "Current monthly infrastructure cost is $500. Maintainer has not announced the payout amount.",
+            html_url: "https://github.com/example/project/issues/8",
+            comments: 1,
+            labels: [{ name: "bounty" }],
+          },
+        ],
+      }),
+    );
+
+    const opportunity = getOpportunityPipeline(db)[0];
+    expect(opportunity.estimatedRevenueCents).toBe(0);
+    expect(opportunity.demandEvidence).toContain("no trusted USD/USDC reward amount could be parsed");
+    db.close();
+  });
+
   it("isolates a failing enabled source from other discovery sources", async () => {
     const db = memoryDb();
     configureOpportunitySource(db, {
