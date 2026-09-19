@@ -45,16 +45,19 @@ The root service choice is a compatibility decision, not the long-term privilege
 
 ## State and secrets
 
-`/root/.automaton` is the authoritative live state. It includes the SQLite database, configuration, heartbeat configuration, SOUL, skills, wallet material, and Conway credentials.
+`/root/.automaton` is the authoritative live state. It includes the SQLite database, configuration, heartbeat configuration, SOUL, skills, wallet material, and any locally provisioned Conway credential file.
 
-Routine backups deliberately exclude raw secrets:
+Production secrets should preferentially live in `/etc/automaton/automaton.env`, which is loaded by systemd and kept mode `0600`. The runtime honors `CONWAY_API_KEY`, `CONWAY_API_URL`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `OLLAMA_BASE_URL` as environment overrides.
+
+Routine backups deliberately exclude raw credential files:
 
 - `wallet.json` is never copied by the standard backup job.
-- `api-key` is never copied by the standard backup job.
-- `automaton.json` is copied only as a sanitized JSON file with API-key fields removed.
+- provisioned `config.json` is never copied by the standard backup job because it can contain the Conway API key.
+- `automaton.json` is copied only after recursively redacting secret-like fields.
+- `/etc/automaton/automaton.env` is never copied by the standard backup job.
 - `state.db` is captured with SQLite's online backup API, not a raw file copy.
 
-Wallet/key recovery must use a separate encrypted recovery procedure whose encryption key is not stored on the parent VM.
+The state backup itself is still sensitive operational data and must remain private. Wallet/API-key recovery must use a separate encrypted recovery procedure whose encryption key is not stored on the parent VM.
 
 ## Process supervision
 
@@ -75,7 +78,7 @@ The application already handles SIGTERM/SIGINT by stopping the heartbeat, moving
 Two layers are used:
 
 1. **Process liveness** — `systemd` is authoritative (`systemctl is-active automaton`).
-2. **Runtime readiness** — `pnpm production:health` checks configuration, wallet presence/permissions, SQLite availability, and current agent state without printing secrets.
+2. **Runtime readiness** — `pnpm production:health` checks configuration, sensitive-file permissions, SQLite integrity, heartbeat configuration, and current agent state without printing secrets.
 
 PR #4 will expose authenticated owner-facing health/status through the control plane. PR #3 does not expose a public health endpoint from the parent VM.
 
@@ -88,19 +91,20 @@ PR #4 will expose authenticated owner-facing health/status through the control p
 - heartbeat configuration
 - SOUL/constitution when present
 - skills directory
-- manifest describing exclusions
+- manifest describing exclusions/redactions
 
-The included systemd timer runs the backup job periodically. Backup retention and off-VM encrypted replication are deployment configuration, not hard-coded business logic.
+The included systemd timer runs the backup job daily. Off-VM encrypted replication and long-term retention remain deployment concerns rather than business logic.
 
 Recovery order:
 
 1. provision a clean Conway VM;
-2. deploy a CI-validated application commit;
-3. restore the non-secret state snapshot;
-4. separately restore wallet/API credentials through the encrypted recovery process;
-5. run `pnpm production:health`;
-6. start `automaton.service`;
-7. verify heartbeat and business review execution before allowing new capital allocation.
+2. deploy a pinned CI-validated application commit at `/opt/automaton`;
+3. restore the non-secret state snapshot under `/root/.automaton`;
+4. separately restore `wallet.json` and required API credentials through the encrypted recovery process;
+5. set sensitive files to mode `0600` and state directories to `0700`;
+6. run `pnpm production:health`;
+7. start `automaton.service` and `automaton-backup.timer`;
+8. verify heartbeat and business review execution before allowing new capital allocation.
 
 ## Deployment lifecycle
 
@@ -116,18 +120,35 @@ feature branch
     -> deploy pinned commit/release to /opt/automaton
     -> pnpm install --frozen-lockfile
     -> pnpm build
+    -> pnpm production:install
     -> pnpm production:health
-    -> restart automaton.service
+    -> start/restart automaton.service
     -> post-deploy health verification
 ```
 
 Production must deploy a pinned tested commit or release. It must not `git pull` an arbitrary latest revision directly into a running agent.
 
+## Initial installation
+
+From a checkout already deployed at `/opt/automaton`:
+
+```bash
+pnpm install --frozen-lockfile
+pnpm build
+sudo pnpm production:install
+sudoedit /etc/automaton/automaton.env
+pnpm production:health
+sudo systemctl start automaton.service automaton-backup.timer
+systemctl is-active automaton
+```
+
+The installer creates required private directories, installs/enables the systemd units, and leaves service startup explicit so configuration and health checks can be completed first.
+
 ## Authority and emergency control
 
 The future Owner Console will provide authenticated chat, approvals, audit views, and emergency controls such as pause autonomy, stop spending, stop trading, and disable child creation. Until that control plane exists, deployment operators use systemd plus configuration/policy controls.
 
-No production deployment should enable unrestricted child replication or live trading merely because the process is online. Those capabilities require their own explicit limits and later implementation gates.
+No production deployment should enable unrestricted child replication or live trading merely because the process is online. `maxChildren: 0` must be honored as a hard replication-off switch; higher values remain explicitly configured limits. Live trading requires its own later implementation gate.
 
 ## Public networking
 
@@ -135,6 +156,6 @@ The parent Automaton is private by default. Conway port exposure is reserved for
 
 ## PR sequence
 
-- PR #3: production runtime foundation — supervision, health, backup, secrets/deployment documentation.
+- PR #3: production runtime foundation — supervision, health, backup, secrets/deployment documentation and runtime hardening.
 - PR #4: Owner Control Plane — authenticated API, chat/dashboard, approvals, emergency controls.
 - Later PRs: external opportunity acquisition, owned/x402 products, and trading execution.
