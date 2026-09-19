@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createDatabase } from "../state/database.js";
+import Database from "better-sqlite3";
 
 export interface ProductionHealthCheck {
   name: string;
@@ -19,6 +19,16 @@ export interface ProductionHealthResult {
 export interface ProductionHealthOptions {
   stateDir?: string;
 }
+
+const VALID_AGENT_STATES = new Set([
+  "setup",
+  "waking",
+  "running",
+  "sleeping",
+  "low_compute",
+  "critical",
+  "dead",
+]);
 
 function resolveStatePath(configuredPath: string | undefined, stateDir: string, fallbackName: string): string {
   if (!configuredPath) return path.join(stateDir, fallbackName);
@@ -77,17 +87,19 @@ export function runProductionHealth(options: ProductionHealthOptions = {}): Prod
   const dbPath = resolveStatePath(configuredDbPath, stateDir, "state.db");
   try {
     if (!fs.existsSync(dbPath)) throw new Error(`database is missing at ${dbPath}`);
-    const db = createDatabase(dbPath);
+    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
     try {
-      const integrity = db.raw.pragma("integrity_check") as Array<{ integrity_check: string }>;
+      const integrity = db.pragma("integrity_check") as Array<{ integrity_check: string }>;
       if (integrity[0]?.integrity_check !== "ok") {
         throw new Error("SQLite integrity_check did not return ok");
       }
-      agentState = db.getAgentState();
+      const row = db.prepare("SELECT value FROM kv WHERE key = ?").get("agent_state") as { value?: string } | undefined;
+      const state = row?.value ?? "setup";
+      agentState = VALID_AGENT_STATES.has(state) ? state : "setup";
     } finally {
       db.close();
     }
-    checks.push({ name: "database", ok: true, detail: "state.db opened successfully and passed integrity_check" });
+    checks.push({ name: "database", ok: true, detail: "state.db opened read-only and passed integrity_check" });
   } catch (error) {
     checks.push({
       name: "database",
