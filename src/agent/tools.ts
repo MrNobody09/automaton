@@ -3344,7 +3344,35 @@ export async function executeTool(
     const decision = policyEngine.evaluate(request);
     policyEngine.logDecision(decision);
 
-    if (decision.action !== "allow") {
+    if (decision.action === "quarantine") {
+      const { consumeApprovedOwnerApproval, requestOwnerApproval } =
+        await import("../control/approvals.js");
+      const approved = consumeApprovedOwnerApproval(
+        context.db.raw,
+        toolName,
+        decision.argsHash,
+      );
+      if (!approved) {
+        const approval = requestOwnerApproval(context.db.raw, {
+          toolName,
+          argsHash: decision.argsHash,
+          args,
+          reason: `${decision.reasonCode}: ${decision.humanMessage}`,
+        });
+        const { insertWakeEvent } = await import("../state/database.js");
+        insertWakeEvent(context.db.raw, "owner_control", "approval_required", {
+          approvalId: approval.id,
+        });
+        return {
+          id: ulid(),
+          name: toolName,
+          arguments: args,
+          result: "",
+          durationMs: Date.now() - startTime,
+          error: `Policy quarantined: ${decision.reasonCode} — owner approval required (${approval.id})`,
+        };
+      }
+    } else if (decision.action !== "allow") {
       return {
         id: ulid(),
         name: toolName,

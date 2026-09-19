@@ -17,6 +17,7 @@ import type {
 import type { ChildLifecycle } from "./lifecycle.js";
 import { ulid } from "ulid";
 import { propagateConstitution } from "./constitution.js";
+import { isChildCreationPaused } from "../control/state.js";
 
 /** Valid Conway sandbox pricing tiers. */
 const SANDBOX_TIERS = [
@@ -77,6 +78,9 @@ export async function spawnChild(
   lifecycle?: ChildLifecycle,
   runtimeConfig?: Pick<AutomatonConfig, "maxChildren" | "childSandboxMemoryMb">,
 ): Promise<ChildAutomaton> {
+  if (isChildCreationPaused(db.raw)) {
+    throw new Error("Child creation is disabled by owner emergency control");
+  }
   assertChildCapacity(db.getChildren(), runtimeConfig?.maxChildren ?? 3);
 
   const childId = ulid();

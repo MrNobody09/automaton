@@ -65,6 +65,15 @@ import { createWorkerInferenceBridge } from "./worker-inference-bridge.js";
 import { ProviderRegistry } from "../inference/provider-registry.js";
 import { UnifiedInferenceClient } from "../inference/inference-client.js";
 import { isIdleOnlyTool } from "./idle-only-tools.js";
+import {
+  claimNextOwnerMessage,
+  isAutonomyPaused,
+  isChildCreationPaused,
+  isSpendingPaused,
+  markOwnerMessageProcessed,
+  resetOwnerMessage,
+  type OwnerMessage,
+} from "../control/state.js";
 
 const logger = createLogger("loop");
 const MAX_TOOL_CALLS_PER_TURN = 10;
@@ -221,6 +230,11 @@ export async function runAgentLoop(
         config: {
           ...config,
           spawnAgent: async (task: any) => {
+            if (isChildCreationPaused(db.raw)) {
+              logger.warn("Owner control blocks worker/child creation", { taskId: task.id });
+              return null;
+            }
+
             // Try Conway sandbox spawn first (production)
             try {
               const { generateGenesisConfig } = await import("../replication/genesis.js");
@@ -234,7 +248,7 @@ export async function runAgentLoop(
               });
 
               const lifecycle = new ChildLifecycle(db.raw);
-              const child = await spawnChild(conway, identity, db, genesis, lifecycle);
+              const child = await spawnChild(conway, identity, db, genesis, lifecycle, config);
 
               return {
                 address: child.address,
@@ -246,7 +260,7 @@ export async function runAgentLoop(
               const is402 = sandboxError?.status === 402 ||
                 sandboxError?.message?.includes("INSUFFICIENT_CREDITS");
 
-              if (is402) {
+              if (is402 && !isSpendingPaused(db.raw)) {
                 const SANDBOX_TOPUP_COOLDOWN_MS = 60_000;
                 const lastAttempt = db.getKV("last_sandbox_topup_attempt");
                 const cooldownExpired = !lastAttempt ||
@@ -279,7 +293,7 @@ export async function runAgentLoop(
                           specialization: `${retryRole}: ${task.title}`,
                         });
                         const retryLifecycle = new RetryLifecycle(db.raw);
-                        const child = await retrySpawn(conway, identity, db, retryGenesis, retryLifecycle);
+                        const child = await retrySpawn(conway, identity, db, retryGenesis, retryLifecycle, config);
                         return {
                           address: child.address,
                           name: child.name,
@@ -299,6 +313,11 @@ export async function runAgentLoop(
                     });
                   }
                 }
+              }
+
+              if (isChildCreationPaused(db.raw)) {
+                logger.warn("Owner control blocked local worker fallback", { taskId: task.id });
+                return null;
               }
 
               // Conway sandbox unavailable — fall back to local worker
@@ -393,8 +412,17 @@ export async function runAgentLoop(
   while (running) {
     // Declared outside try so the catch block can access for retry/failure handling
     let claimedMessages: InboxMessageRow[] = [];
+    let claimedOwnerMessage: OwnerMessage | undefined;
 
     try {
+      if (isAutonomyPaused(db.raw)) {
+        log(config, "[OWNER CONTROL] Autonomy paused by owner.");
+        db.setAgentState("sleeping");
+        onStateChange?.("sleeping");
+        running = false;
+        break;
+      }
+
       // Check if we should be sleeping
       const sleepUntil = db.getKV("sleep_until");
       if (sleepUntil && new Date(sleepUntil) > new Date()) {
@@ -404,6 +432,16 @@ export async function runAgentLoop(
         onStateChange?.("sleeping");
         running = false;
         break;
+      }
+
+      if (!pendingInput) {
+        claimedOwnerMessage = claimNextOwnerMessage(db.raw);
+        if (claimedOwnerMessage) {
+          pendingInput = {
+            content: `[Owner instruction]: ${claimedOwnerMessage.content}`,
+            source: "creator",
+          };
+        }
       }
 
       // Check for unprocessed inbox messages using the state machine:
@@ -441,7 +479,7 @@ export async function runAgentLoop(
         // available, buy credits NOW — before attempting inference.
         // This prevents the agent from dying mid-loop while waiting for
         // the heartbeat to fire. Uses a 60s cooldown to avoid hammering.
-        if ((tier === "critical" || tier === "low_compute") && financial.usdcBalance >= 5) {
+        if (!isSpendingPaused(db.raw) && (tier === "critical" || tier === "low_compute") && financial.usdcBalance >= 5) {
           const INLINE_TOPUP_COOLDOWN_MS = 60_000;
           const lastInlineTopup = db.getKV("last_inline_topup_attempt");
           const cooldownExpired = !lastInlineTopup ||
@@ -695,6 +733,9 @@ export async function runAgentLoop(
         if (claimedIds.length > 0) {
           markInboxProcessed(db.raw, claimedIds);
         }
+        if (claimedOwnerMessage) {
+          markOwnerMessageProcessed(db.raw, claimedOwnerMessage.id);
+        }
       });
       onTurnComplete?.(turn);
 
@@ -899,6 +940,10 @@ export async function runAgentLoop(
     } catch (err: any) {
       consecutiveErrors++;
       log(config, `[ERROR] Turn failed: ${err.message}`);
+
+      if (claimedOwnerMessage) {
+        resetOwnerMessage(db.raw, claimedOwnerMessage.id, err.message || String(err));
+      }
 
       // Handle inbox message state on turn failure:
       // Messages that have retries remaining go back to 'received';
