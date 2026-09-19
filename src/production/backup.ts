@@ -19,6 +19,18 @@ function sanitize(value: unknown, key = ""): unknown {
   return value;
 }
 
+function resolveStatePath(configuredPath: string | undefined, stateDir: string, fallbackName: string): string {
+  if (!configuredPath) return path.join(stateDir, fallbackName);
+  if (configuredPath === "~/.automaton") return stateDir;
+  if (configuredPath.startsWith("~/.automaton/")) {
+    return path.join(stateDir, configuredPath.slice("~/.automaton/".length));
+  }
+  if (configuredPath.startsWith("~/")) {
+    return path.join(os.homedir(), configuredPath.slice(2));
+  }
+  return configuredPath;
+}
+
 function copyIfPresent(source: string, destination: string): void {
   if (!fs.existsSync(source)) return;
   fs.cpSync(source, destination, { recursive: true, dereference: false });
@@ -49,9 +61,11 @@ export async function createProductionBackup(options: ProductionBackupOptions = 
     );
   }
 
-  const dbPath = typeof config.dbPath === "string" && !config.dbPath.startsWith("~")
-    ? config.dbPath
-    : path.join(stateDir, "state.db");
+  const dbPath = resolveStatePath(
+    typeof config.dbPath === "string" ? config.dbPath : undefined,
+    stateDir,
+    "state.db",
+  );
   if (!fs.existsSync(dbPath)) throw new Error(`state database not found at ${dbPath}`);
   const db = new Database(dbPath, { readonly: true });
   try {
@@ -60,7 +74,12 @@ export async function createProductionBackup(options: ProductionBackupOptions = 
     db.close();
   }
 
-  copyIfPresent(path.join(stateDir, "heartbeat.yml"), path.join(destination, "heartbeat.yml"));
+  const heartbeatPath = resolveStatePath(
+    typeof config.heartbeatConfigPath === "string" ? config.heartbeatConfigPath : undefined,
+    stateDir,
+    "heartbeat.yml",
+  );
+  copyIfPresent(heartbeatPath, path.join(destination, "heartbeat.yml"));
   copyIfPresent(path.join(stateDir, "SOUL.md"), path.join(destination, "SOUL.md"));
   copyIfPresent(path.join(stateDir, "constitution.md"), path.join(destination, "constitution.md"));
   copyIfPresent(path.join(stateDir, "skills"), path.join(destination, "skills"));
@@ -68,7 +87,8 @@ export async function createProductionBackup(options: ProductionBackupOptions = 
   const manifest = {
     createdAt: now.toISOString(),
     sourceStateDir: stateDir,
-    excluded: ["wallet.json", "api-key", "raw secret-bearing environment files"],
+    excluded: ["wallet.json", "config.json", "raw secret-bearing environment files"],
+    redactedConfigFields: "keys matching api-key/private-key/secret/token/password/credential patterns",
     note: "Restore wallet/API credentials separately from encrypted secret recovery material.",
   };
   fs.writeFileSync(path.join(destination, "manifest.json"), JSON.stringify(manifest, null, 2), { mode: 0o600 });
