@@ -23,6 +23,7 @@ import type {
 } from "../types.js";
 import { BUILTIN_TASKS } from "./tasks.js";
 import { BUSINESS_REVIEW_TASK_NAME, businessReviewTask } from "./business-task.js";
+import { OPPORTUNITY_DISCOVERY_TASK_NAME, opportunityDiscoveryTask } from "./opportunity-task.js";
 import { DurableScheduler } from "./scheduler.js";
 import { upsertHeartbeatSchedule } from "../state/database.js";
 import type BetterSqlite3 from "better-sqlite3";
@@ -76,6 +77,7 @@ export function createHeartbeatDaemon(
   for (const [name, fn] of Object.entries(BUILTIN_TASKS)) {
     taskMap.set(name, fn);
   }
+  taskMap.set(OPPORTUNITY_DISCOVERY_TASK_NAME, opportunityDiscoveryTask);
   taskMap.set(BUSINESS_REVIEW_TASK_NAME, businessReviewTask);
 
   // Seed heartbeat_schedule from config entries if not already present
@@ -86,7 +88,7 @@ export function createHeartbeatDaemon(
       intervalMs: null,
       enabled: entry.enabled ? 1 : 0,
       priority: 0,
-      timeoutMs: 30_000,
+      timeoutMs: entry.name === OPPORTUNITY_DISCOVERY_TASK_NAME ? 180_000 : 30_000,
       maxRetries: 1,
       tierMinimum: "dead",
       lastRunAt: entry.lastRun ?? null,

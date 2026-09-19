@@ -3,6 +3,7 @@ import path from "node:path";
 import { createDatabase } from "../src/state/database.js";
 import { createBusinessTools } from "../src/business/tools.js";
 import { createBusinessIntelligenceTools } from "../src/business/intelligence-tools.js";
+import { createOpportunityAcquisitionTools } from "../src/business/acquisition-tools.js";
 
 function expandHome(value: string): string {
   if (value === "~") return os.homedir();
@@ -22,6 +23,10 @@ const toolGroups = [
   {
     tools: createBusinessIntelligenceTools(),
     cliPath: path.resolve(process.cwd(), "dist/business/intelligence-cli.js"),
+  },
+  {
+    tools: createOpportunityAcquisitionTools(),
+    cliPath: path.resolve(process.cwd(), "dist/business/acquisition-cli.js"),
   },
 ];
 

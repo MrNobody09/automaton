@@ -243,6 +243,9 @@ export function updateBusinessOpportunity(
   assertUnitInterval(merged.successProbability!, "successProbability");
   assertUnitInterval(merged.riskScore!, "riskScore");
   assertUnitInterval(merged.learningValue!, "learningValue");
+  if (!Number.isInteger(merged.timeToRevenueDays) || merged.timeToRevenueDays! < 0) {
+    throw new Error("timeToRevenueDays must be a non-negative integer");
+  }
 
   db.prepare(`
     UPDATE business_opportunities SET
