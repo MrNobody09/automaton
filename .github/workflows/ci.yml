@@ -45,4 +45,4 @@ jobs:
           node-version: 22
       - uses: pnpm/action-setup@v4
       - run: pnpm install --frozen-lockfile
-      - run: pnpm audit --audit-level=high || true
+      - run: pnpm audit --audit-level=high
