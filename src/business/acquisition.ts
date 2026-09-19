@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type BetterSqlite3 from "better-sqlite3";
 import { ulid } from "ulid";
-import { sanitizeToolResult } from "../agent/injection-defense.js";
+import { sanitizeInput, sanitizeToolResult } from "../agent/injection-defense.js";
 import {
   createBusinessOpportunity,
   getBusinessOpportunity,
@@ -407,10 +407,11 @@ async function fetch0xWorkCandidates(
     if (bountyUsd === null || bountyUsd < minBountyUsd || bountyUsd > maxBountyUsd) continue;
 
     const externalId = cleanText(task.chainTaskId ?? task.chain_task_id ?? task.id ?? "", 128);
-    const title = cleanText(task.title ?? task.name ?? `0xWork task ${externalId}`, 500);
+    const externalSource = `0xwork-${createFingerprint(externalId || "unknown").slice(0, 16)}`;
+    const title = cleanExternalText(task.title ?? task.name ?? `0xWork task ${externalId}`, 500, externalSource);
     if (!externalId || !title) continue;
 
-    const description = cleanText(task.description ?? task.details ?? task.body ?? "", MAX_DESCRIPTION_CHARS);
+    const description = cleanExternalText(task.description ?? task.details ?? task.body ?? "", MAX_DESCRIPTION_CHARS, externalSource);
     const deadlineRaw = task.deadline ?? task.deadlineAt ?? task.deadline_at;
     const deadlineDays = daysUntil(deadlineRaw, 7);
     if (deadlineDays < 0) continue;
@@ -496,8 +497,9 @@ async function fetchGitHubIssueCandidates(
       if (issue.pull_request) continue;
       const number = Number(issue.number);
       if (!Number.isInteger(number) || number <= 0) continue;
-      const title = cleanText(issue.title ?? "", 500);
-      const body = cleanText(issue.body ?? "", MAX_DESCRIPTION_CHARS);
+      const externalSource = `github-${createFingerprint(`${repository}#${number}`).slice(0, 16)}`;
+      const title = cleanExternalText(issue.title ?? "", 500, externalSource);
+      const body = cleanExternalText(issue.body ?? "", MAX_DESCRIPTION_CHARS, externalSource);
       const externalUrl = cleanText(issue.html_url ?? `https://github.com/${repository}/issues/${number}`, 2_048);
       if (!title || !externalUrl) continue;
 
@@ -775,6 +777,14 @@ function normalizeSourceId(raw: string): string {
   return value;
 }
 
+function cleanExternalText(value: unknown, maxLength: number, source: string): string {
+  if (value === null || value === undefined) return "";
+  const raw = String(value);
+  const sanitized = sanitizeInput(raw, source, "social_message");
+  if (sanitized.blocked) return "[External content blocked by injection defense]";
+  return sanitizeToolResult(sanitized.content, maxLength).trim();
+}
+
 function cleanText(value: unknown, maxLength: number): string {
   if (value === null || value === undefined) return "";
   return sanitizeToolResult(String(value), maxLength).trim();
@@ -849,7 +859,9 @@ function boundedJson(value: unknown, maxLength: number): string {
   } catch {
     encoded = JSON.stringify({ serializationError: true });
   }
-  return encoded.length <= maxLength ? encoded : encoded.slice(0, maxLength);
+  if (encoded.length <= maxLength) return encoded;
+  const previewLength = Math.max(256, Math.floor(maxLength / 2));
+  return JSON.stringify({ truncated: true, preview: encoded.slice(0, previewLength) });
 }
 
 function safeJson(raw: string | undefined): Record<string, any> {
