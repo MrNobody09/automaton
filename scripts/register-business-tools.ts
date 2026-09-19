@@ -2,6 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { createDatabase } from "../src/state/database.js";
 import { createBusinessTools } from "../src/business/tools.js";
+import { createBusinessIntelligenceTools } from "../src/business/intelligence-tools.js";
 
 function expandHome(value: string): string {
   if (value === "~") return os.homedir();
@@ -11,24 +12,36 @@ function expandHome(value: string): string {
 
 const dbPath = expandHome(process.env.AUTOMATON_DB_PATH || "~/.automaton/state.db");
 const db = createDatabase(dbPath);
-const cliPath = path.resolve(process.cwd(), "dist/business/cli.js");
 const node = process.execPath;
 
-const tools = createBusinessTools();
+const toolGroups = [
+  {
+    tools: createBusinessTools(),
+    cliPath: path.resolve(process.cwd(), "dist/business/cli.js"),
+  },
+  {
+    tools: createBusinessIntelligenceTools(),
+    cliPath: path.resolve(process.cwd(), "dist/business/intelligence-cli.js"),
+  },
+];
 
-for (const tool of tools) {
-  db.installTool({
-    id: `business:${tool.name}`,
-    name: tool.name,
-    type: "custom",
-    config: {
-      command: `${JSON.stringify(node)} ${JSON.stringify(cliPath)} ${tool.name}`,
-      parameters: tool.parameters,
-    },
-    installedAt: new Date().toISOString(),
-    enabled: true,
-  });
+let registered = 0;
+for (const group of toolGroups) {
+  for (const tool of group.tools) {
+    db.installTool({
+      id: `business:${tool.name}`,
+      name: tool.name,
+      type: "custom",
+      config: {
+        command: `${JSON.stringify(node)} ${JSON.stringify(group.cliPath)} ${tool.name}`,
+        parameters: tool.parameters,
+      },
+      installedAt: new Date().toISOString(),
+      enabled: true,
+    });
+    registered++;
+  }
 }
 
 db.close();
-console.log(`Registered ${tools.length} business tools in ${dbPath}`);
+console.log(`Registered ${registered} business tools in ${dbPath}`);
