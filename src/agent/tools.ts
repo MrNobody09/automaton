@@ -1648,6 +1648,7 @@ Model: ${ctx.inference.getDefaultModel()}
             ctx.db,
             genesis,
             lifecycle,
+            ctx.config,
           );
         } catch (err: any) {
           // Auto-topup on 402 insufficient credits and retry once
@@ -1681,6 +1682,7 @@ Model: ${ctx.inference.getDefaultModel()}
                   ctx.db,
                   retryGenesis,
                   retryLifecycle,
+                  ctx.config,
                 );
               }
             }
@@ -3227,17 +3229,32 @@ export function loadInstalledTools(db: {
 }): AutomatonTool[] {
   try {
     const installed = db.getInstalledTools();
-    return installed.map((tool) => ({
-      name: tool.name,
-      description: `Installed tool: ${tool.name}`,
-      category: (tool.type === "mcp" ? "conway" : "vm") as ToolCategory,
-      riskLevel: "caution" as RiskLevel,
-      parameters: (tool.config?.parameters as Record<string, unknown>) || {
-        type: "object",
-        properties: {},
-      },
-      execute: createInstalledToolExecutor(tool),
-    }));
+    const validCategories = new Set<string>([
+      "vm", "conway", "self_mod", "financial", "survival", "skills",
+      "git", "registry", "replication", "memory",
+    ]);
+    const validRiskLevels = new Set<string>(["safe", "caution", "dangerous"]);
+    return installed.map((tool) => {
+      const configuredCategory = tool.config?.category;
+      const configuredRisk = tool.config?.riskLevel;
+      const category = typeof configuredCategory === "string" && validCategories.has(configuredCategory)
+        ? configuredCategory as ToolCategory
+        : (tool.type === "mcp" ? "conway" : "vm") as ToolCategory;
+      const riskLevel = typeof configuredRisk === "string" && validRiskLevels.has(configuredRisk)
+        ? configuredRisk as RiskLevel
+        : "caution" as RiskLevel;
+      return {
+        name: tool.name,
+        description: `Installed tool: ${tool.name}`,
+        category,
+        riskLevel,
+        parameters: (tool.config?.parameters as Record<string, unknown>) || {
+          type: "object",
+          properties: {},
+        },
+        execute: createInstalledToolExecutor(tool),
+      };
+    });
   } catch (error) {
     logger.error(
       "Failed to load installed tools",

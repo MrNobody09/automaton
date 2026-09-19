@@ -37,6 +37,8 @@ for (const group of toolGroups) {
         parameters: tool.parameters,
         category: tool.category,
         riskLevel: tool.riskLevel,
+        category: tool.category,
+        riskLevel: tool.riskLevel,
       },
       installedAt: new Date().toISOString(),
       enabled: true,
