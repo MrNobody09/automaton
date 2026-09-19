@@ -1,0 +1,19 @@
+[Unit]
+Description=Backup Conway Automaton State
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/automaton
+Environment=HOME=/root
+Environment=AUTOMATON_BACKUP_DIR=/var/backups/automaton
+EnvironmentFile=-/etc/automaton/automaton.env
+UMask=0077
+ExecStart=/usr/bin/node /opt/automaton/dist/production/backup-cli.js
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ReadWritePaths=/root/.automaton /var/backups/automaton

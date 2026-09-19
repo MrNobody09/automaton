@@ -47,6 +47,9 @@
     "test:financial": "vitest run --grep 'financial|spend|treasury'",
     "test:ci": "vitest run --reporter=verbose",
     "business:register": "tsx scripts/register-business-tools.ts",
+    "production:health": "node dist/production/health-cli.js",
+    "production:backup": "node dist/production/backup-cli.js",
+    "production:install": "bash scripts/install-production.sh",
     "clean": "rm -rf dist && pnpm -r clean"
   },
   "dependencies": {

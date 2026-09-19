@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule Conway Automaton State Backups
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=900
+Unit=automaton-backup.service
+
+[Install]
+WantedBy=timers.target

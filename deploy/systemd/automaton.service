@@ -1,0 +1,27 @@
+[Unit]
+Description=Conway Automaton Parent Runtime
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/automaton
+Environment=HOME=/root
+Environment=NODE_ENV=production
+EnvironmentFile=-/etc/automaton/automaton.env
+UMask=0077
+ExecStart=/usr/bin/node /opt/automaton/dist/index.js --run
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ReadWritePaths=/root/.automaton /var/backups/automaton /opt/automaton
+
+[Install]
+WantedBy=multi-user.target

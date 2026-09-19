@@ -49,6 +49,23 @@ export function isValidWalletAddress(address: string, chainType?: ChainType): bo
   );
 }
 
+export function assertChildCapacity(
+  children: Array<Pick<ChildAutomaton, "status">>,
+  maxChildren: number,
+): void {
+  if (!Number.isInteger(maxChildren) || maxChildren < 0) {
+    throw new Error(`Invalid maxChildren configuration: ${maxChildren}`);
+  }
+  const active = children.filter(
+    (c) => c.status !== "dead" && c.status !== "cleaned_up" && c.status !== "failed",
+  );
+  if (active.length >= maxChildren) {
+    throw new Error(
+      `Cannot spawn: already at max children (${maxChildren}). Kill or wait for existing children to die.`,
+    );
+  }
+}
+
 /**
  * Spawn a child automaton in a new Conway sandbox using lifecycle state machine.
  */
@@ -58,22 +75,9 @@ export async function spawnChild(
   db: AutomatonDatabase,
   genesis: GenesisConfig,
   lifecycle?: ChildLifecycle,
+  runtimeConfig?: Pick<AutomatonConfig, "maxChildren" | "childSandboxMemoryMb">,
 ): Promise<ChildAutomaton> {
-  // Check child limit from config
-  const existing = db
-    .getChildren()
-    .filter(
-      (c) =>
-        c.status !== "dead" &&
-        c.status !== "cleaned_up" &&
-        c.status !== "failed",
-    );
-  const maxChildren = (db as any).config?.maxChildren ?? 3;
-  if (existing.length >= maxChildren) {
-    throw new Error(
-      `Cannot spawn: already at max children (${maxChildren}). Kill or wait for existing children to die.`,
-    );
-  }
+  assertChildCapacity(db.getChildren(), runtimeConfig?.maxChildren ?? 3);
 
   const childId = ulid();
   let sandboxId: string | undefined;
@@ -81,7 +85,7 @@ export async function spawnChild(
 
   // If no lifecycle provided, use legacy path
   if (!lifecycle) {
-    return spawnChildLegacy(conway, identity, db, genesis, childId);
+    return spawnChildLegacy(conway, identity, db, genesis, childId, runtimeConfig);
   }
 
   try {
@@ -90,7 +94,7 @@ export async function spawnChild(
     lifecycle.initChild(childId, genesis.name, "", genesis.genesisPrompt, childChainType);
 
     // Get child sandbox memory from config (default 1024MB)
-    const childMemoryMb = (db as any).config?.childSandboxMemoryMb ?? 1024;
+    const childMemoryMb = runtimeConfig?.childSandboxMemoryMb ?? 1024;
 
     // Try to reuse an existing sandbox whose DB record is 'failed' but
     // is still running remotely, before creating a new one.
@@ -244,11 +248,12 @@ async function spawnChildLegacy(
   db: AutomatonDatabase,
   genesis: GenesisConfig,
   childId: string,
+  runtimeConfig?: Pick<AutomatonConfig, "maxChildren" | "childSandboxMemoryMb">,
 ): Promise<ChildAutomaton> {
   let sandboxId: string | undefined;
 
   // Get child sandbox memory from config (default 1024MB)
-  const childMemoryMb = (db as any).config?.childSandboxMemoryMb ?? 1024;
+  const childMemoryMb = runtimeConfig?.childSandboxMemoryMb ?? 1024;
 
   const legacyTier = selectSandboxTier(childMemoryMb);
 
