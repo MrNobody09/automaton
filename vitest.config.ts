@@ -4,7 +4,14 @@ export default defineConfig({
   test: {
     testTimeout: 30_000,
     teardownTimeout: 5_000,
-    include: ["src/__tests__/**/*.test.ts"],
+    include: ["**/*.{test,spec}.{ts,tsx,js,jsx,mjs,cjs}"],
+    exclude: [
+      "**/.git/**",
+      "**/.pnpm-store/**",
+      "**/node_modules/**",
+      "**/dist/**",
+      "**/coverage/**",
+    ],
     coverage: {
       provider: "v8",
       include: ["src/**/*.ts"],
