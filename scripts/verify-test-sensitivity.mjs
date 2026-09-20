@@ -133,6 +133,17 @@ function skippedTestContractControl() {
   }
 }
 
+function foreignLockfileContractControl() {
+  const fixture = path.join(repoRoot, "package-lock.json");
+  fs.writeFileSync(fixture, '{"lockfileVersion":3}\n');
+  try {
+    const result = command(process.execPath, [validationContract], { timeoutMs: 30_000 });
+    expectRejected("validation contract rejects foreign dependency lockfiles", result, "package-lock.json must not exist");
+  } finally {
+    fs.rmSync(fixture, { force: true });
+  }
+}
+
 requireCleanWorkingTree("before sensitivity checks");
 runnerAssertionControl();
 runnerTimeoutControl();
@@ -229,11 +240,30 @@ const contractControls = [
     replacements: [["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "actions/checkout@v7"]],
     requiredText: "moving major-version action tag",
   },
+  {
+    label: "validation contract rejects persisted checkout credentials",
+    file: ".github/workflows/release.yml",
+    replacements: [["          persist-credentials: false", "          persist-credentials: true"]],
+    requiredText: "Release workflow is missing required validation/hardening contract: persist-credentials: false",
+  },
+  {
+    label: "validation contract rejects broadened workflow permissions",
+    file: ".github/workflows/release.yml",
+    replacements: [["permissions:\n  contents: read", "permissions:\n  contents: write"]],
+    requiredText: "Release workflow is missing required validation/hardening contract: permissions:",
+  },
+  {
+    label: "validation contract rejects globally enabled test network",
+    file: ".github/workflows/release.yml",
+    replacements: [["jobs:\n  release:", "env:\n  AUTOMATON_TEST_ALLOW_NETWORK: 1\n\njobs:\n  release:"]],
+    requiredText: "must not globally enable external network access for tests",
+  },
 ];
 
 for (const control of contractControls) contractMutationControl(control);
 skippedTestContractControl();
+foreignLockfileContractControl();
 
 requireCleanWorkingTree("after sensitivity checks");
-const totalControls = productionControls.length + contractControls.length + 3;
+const totalControls = productionControls.length + contractControls.length + 4;
 console.log(`[sensitivity] PASS: ${totalControls} negative controls were all detected.`);

@@ -16,7 +16,19 @@ function read(rel) {
   return fs.readFileSync(path.join(repoRoot, rel), "utf8");
 }
 
+for (const foreignLock of ["package-lock.json", "yarn.lock", "bun.lock", "bun.lockb"]) {
+  if (fs.existsSync(path.join(repoRoot, foreignLock))) {
+    fail(`${foreignLock} must not exist: pnpm-lock.yaml is the repository's single dependency lockfile.`);
+  }
+}
+if (!fs.existsSync(path.join(repoRoot, "pnpm-lock.yaml"))) {
+  fail("pnpm-lock.yaml is required as the repository's dependency lockfile.");
+}
+
 const packageJson = JSON.parse(read("package.json"));
+if (packageJson.packageManager !== "pnpm@10.28.1") {
+  fail(`packageManager must remain pinned to pnpm@10.28.1; found ${String(packageJson.packageManager)}`);
+}
 const scripts = packageJson.scripts ?? {};
 for (const name of ["test", "test:ci", "test:isolated", "test:regression", "test:security", "test:financial"]) {
   const value = scripts[name];
@@ -58,6 +70,9 @@ for (const [label, workflow] of [["CI", ci], ["Release", release]]) {
   if (/uses:\s+[^\n]+@v\d+\b/.test(workflow)) {
     fail(`${label} workflow uses a moving major-version action tag instead of an immutable commit SHA.`);
   }
+  if (/AUTOMATON_TEST_ALLOW_NETWORK\s*:\s*["']?1\b/.test(workflow)) {
+    fail(`${label} workflow must not globally enable external network access for tests.`);
+  }
 }
 
 const probe = "validation-topology-probe.test.mjs";
@@ -81,4 +96,4 @@ for (const testFile of discovered.filter((file) => file !== probe)) {
   }
 }
 
-console.log(`[validation-contract] PASS: ${discovered.length - 1} repository tests share Vitest discovery; blocking scripts use isolated execution; test TypeScript is statically checked; the network guard and allowOnly protection are mandatory; CI/Release share core gates; workflow credentials/permissions are minimized; actions are SHA-pinned; and no skipped/only/todo tests were found.`);
+console.log(`[validation-contract] PASS: ${discovered.length - 1} repository tests share Vitest discovery; pnpm has the only lockfile; blocking scripts use isolated execution; test TypeScript is statically checked; the network guard and allowOnly protection are mandatory; CI/Release share core gates without enabling external test network; workflow credentials/permissions are minimized; actions are SHA-pinned; and no skipped/only/todo tests were found.`);
