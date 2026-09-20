@@ -11,7 +11,6 @@ import type Database from "better-sqlite3";
 import type {
   PolicyRule,
   PolicyRequest,
-  PolicyRuleResult,
   PolicyDecision,
   PolicyAction,
   AuthorityLevel,
@@ -32,9 +31,11 @@ export class PolicyEngine {
   /**
    * Evaluate a tool call request against all applicable policy rules.
    * Returns a PolicyDecision with the overall action.
+   *
+   * Policy evaluation is fail-closed: a rule exception becomes a denial rather
+   * than allowing an action because a safety/control check malfunctioned.
    */
   evaluate(request: PolicyRequest): PolicyDecision {
-    const startTime = Date.now();
     const applicableRules = this.rules.filter((rule) =>
       this.ruleApplies(rule, request),
     );
@@ -47,7 +48,17 @@ export class PolicyEngine {
 
     for (const rule of applicableRules) {
       rulesEvaluated.push(rule.id);
-      const result = rule.evaluate(request);
+
+      let result;
+      try {
+        result = rule.evaluate(request);
+      } catch (error) {
+        overallAction = "deny";
+        reasonCode = "POLICY_RULE_ERROR";
+        humanMessage = `Policy rule ${rule.id} failed during evaluation; action denied safely.`;
+        rulesTriggered.push(rule.id);
+        break;
+      }
 
       if (result === null) {
         continue;
