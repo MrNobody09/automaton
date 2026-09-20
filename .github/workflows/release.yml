@@ -2,9 +2,11 @@ name: Release
 on:
   push:
     tags: ['v*']
+
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -17,5 +19,8 @@ jobs:
       - run: pnpm run test:regression
       - run: pnpm run test:security
       - run: pnpm run test:financial
-      - run: pnpm test
+      - name: Run complete process-isolated test suite
+        env:
+          TEST_FILE_TIMEOUT_MS: 120000
+        run: pnpm test
       - run: pnpm audit --audit-level=high
