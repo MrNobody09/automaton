@@ -35,12 +35,13 @@ jobs:
       - name: Run financial regression suite
         run: pnpm run test:financial
 
-  full-suite-shard:
+  isolated-full-suite:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -48,41 +49,10 @@ jobs:
           node-version: 22
       - uses: pnpm/action-setup@v6
       - run: pnpm install --frozen-lockfile
-      - name: Run full-suite shard ${{ matrix.shard }}/4
-        timeout-minutes: 4
-        run: pnpm exec vitest run --shard=${{ matrix.shard }}/4
-
-  lifecycle-isolation:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        test-file:
-          - src/__tests__/orchestration/health-monitor.test.ts
-          - src/__tests__/policy-engine.test.ts
-          - src/__tests__/memory.test.ts
-          - src/__tests__/integration/inference-failover.test.ts
-          - src/__tests__/orchestration/plan-mode.test.ts
-          - src/__tests__/inbox-processing.test.ts
-          - src/__tests__/inference/provider-registry.test.ts
-          - src/__tests__/orchestration/planner.test.ts
-          - src/__tests__/memory/enhanced-retriever.test.ts
-          - src/__tests__/memory/event-stream.test.ts
-          - src/__tests__/agent/general-harness.test.ts
-          - src/__tests__/agent/loop-detector.test.ts
-          - src/__tests__/siws.test.ts
-          - src/__tests__/wallet-solana.test.ts
-          - src/__tests__/social.test.ts
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 22
-      - uses: pnpm/action-setup@v6
-      - run: pnpm install --frozen-lockfile
-      - name: Isolate ${{ matrix.test-file }}
-        timeout-minutes: 2
-        run: pnpm exec vitest run ${{ matrix.test-file }}
+      - name: Run isolated full-suite shard ${{ matrix.shard }}/4
+        env:
+          TEST_FILE_TIMEOUT_MS: 120000
+        run: node scripts/run-isolated-tests.mjs ${{ matrix.shard }} 4
 
   security-audit:
     runs-on: ubuntu-latest
