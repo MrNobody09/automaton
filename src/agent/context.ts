@@ -19,6 +19,7 @@ import { createTokenCounter } from "../memory/context-manager.js";
 
 const MAX_CONTEXT_TURNS = 20;
 const SUMMARY_THRESHOLD = 15;
+const MAX_EXACT_TOKENIZATION_CHARS = 16_384;
 
 let tokenCounter: ReturnType<typeof createTokenCounter> | null = null;
 
@@ -31,11 +32,20 @@ export { DEFAULT_TOKEN_BUDGET };
 
 /**
  * Estimate token count from text length.
- * Conservative estimate: ~4 characters per token for English text.
+ *
+ * Exact tokenization is intentionally bounded. Tokenizing very large or
+ * adversarial strings can become disproportionately expensive, while this
+ * function only needs a conservative context-budget estimate. Oversized
+ * inputs therefore use the character heuristic directly.
  */
 export function estimateTokens(text: string): number {
   const content = text ?? "";
   const legacyEstimate = Math.ceil(content.length / 4);
+
+  if (content.length > MAX_EXACT_TOKENIZATION_CHARS) {
+    return legacyEstimate;
+  }
+
   try {
     if (!tokenCounter) {
       tokenCounter = createTokenCounter();
