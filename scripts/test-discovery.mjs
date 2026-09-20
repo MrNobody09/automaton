@@ -22,7 +22,7 @@ export async function discoverTestFiles(repoRoot) {
   try {
     const discovered = [];
     for (const project of vitest.projects) {
-      const { testFiles } = project.globTestFiles();
+      const { testFiles } = await project.globTestFiles();
       for (const testFile of testFiles) {
         discovered.push(normalizeRelative(repoRoot, testFile));
       }
