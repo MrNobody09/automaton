@@ -19,6 +19,16 @@ import {
 } from "./mocks.js";
 import type { AutomatonDatabase, AgentTurn, AgentState } from "../types.js";
 
+vi.mock("../registry/erc8004.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../registry/erc8004.js")>();
+  return {
+    ...actual,
+    getTotalAgents: vi.fn(async () => 0),
+    getRegisteredAgentsByEvents: vi.fn(async () => []),
+    queryAgent: vi.fn(async () => null),
+  };
+});
+
 describe("Agent Loop", () => {
   let db: AutomatonDatabase;
   let conway: MockConwayClient;
@@ -708,7 +718,7 @@ describe("Agent Loop", () => {
     expect(enforcementTurn).toBeUndefined();
   });
 
-  it("discover_agents turns are retained in context (not classified as idle)", { timeout: 180_000 }, async () => {
+  it("discover_agents turns are retained in context (not classified as idle)", async () => {
     // A turn with only discover_agents should NOT trigger maintenance loop detection
     // because discover_agents is no longer in IDLE_ONLY_TOOLS
     function discoverResponse(uid: string): ReturnType<typeof toolCallResponse> {

@@ -579,12 +579,13 @@ export async function getRegisteredAgentsByEvents(
 
   try {
     const currentBlock = await publicClient.getBlockNumber();
-    // Scan last 500,000 blocks (~11.5 days on Base at 2s blocks)
-    const earliestBlock = currentBlock > 500_000n ? currentBlock - 500_000n : 0n;
-
-    // Paginate backward in ≤10K-block chunks (newest-first).
-    // Base public RPC enforces a 10,000-block limit on eth_getLogs.
-    const MAX_BLOCK_RANGE = 10_000n;
+    // Scan a bounded recent window. The public Base RPC currently limits
+    // eth_getLogs to 2,000 blocks inclusive, so a 1,999-block difference is
+    // the largest portable range. Cap default work at roughly 50 chunks.
+    const MAX_BLOCK_RANGE = 1_999n;
+    const MAX_SCAN_CHUNKS = 50n;
+    const maxLookback = MAX_BLOCK_RANGE * MAX_SCAN_CHUNKS;
+    const earliestBlock = currentBlock > maxLookback ? currentBlock - maxLookback : 0n;
     const MAX_CONSECUTIVE_FAILURES = 5;
     const PER_CHUNK_TIMEOUT_MS = 8_000;
     const allLogs: { args: { tokenId?: bigint; to?: string; from?: string } }[] = [];
