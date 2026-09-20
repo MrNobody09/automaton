@@ -37,6 +37,7 @@ function step(order: number, description: string): ProceduralStep {
     tool: null,
     argsTemplate: null,
     expectedOutcome: null,
+    onFailure: null,
   };
 }
 
