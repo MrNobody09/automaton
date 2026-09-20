@@ -54,6 +54,19 @@ jobs:
           TEST_FILE_TIMEOUT_MS: 120000
         run: node scripts/run-isolated-tests.mjs ${{ matrix.shard }} 4
 
+  test-sensitivity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v6
+      - run: pnpm install --frozen-lockfile
+      - name: Prove validation detects known-bad behavior
+        run: node scripts/verify-test-sensitivity.mjs
+
   security-audit:
     runs-on: ubuntu-latest
     steps:
