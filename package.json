@@ -36,6 +36,7 @@
     "dev": "tsx watch src/index.ts",
     "test": "node scripts/run-isolated-tests.mjs",
     "typecheck": "tsc --noEmit",
+    "typecheck:tests": "tsc -p tsconfig.tests.json --noEmit",
     "test:coverage": "vitest run --coverage",
     "test:security": "pnpm test",
     "test:financial": "pnpm test",

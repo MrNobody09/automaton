@@ -24,16 +24,36 @@ for (const name of ["test", "test:ci", "test:isolated", "test:regression", "test
   if (!value.includes("run-isolated-tests.mjs") && value !== "pnpm test") {
     fail(`${name} must route through the process-isolated test runner; found: ${value}`);
   }
-  if (/\bvitest\b/.test(value)) {
-    fail(`${name} must not invoke Vitest directly.`);
-  }
+  if (/\bvitest\b/.test(value)) fail(`${name} must not invoke Vitest directly.`);
+}
+if (scripts["typecheck:tests"] !== "tsc -p tsconfig.tests.json --noEmit") {
+  fail("typecheck:tests must typecheck the dedicated test TypeScript configuration.");
+}
+if (!fs.existsSync(path.join(repoRoot, "tsconfig.tests.json"))) {
+  fail("tsconfig.tests.json is required so test TypeScript cannot escape static checking.");
+}
+
+const vitestConfig = read("vitest.config.ts");
+if (!vitestConfig.includes('setupFiles: ["./test/setup/network-guard.ts"]')) {
+  fail("Vitest must install the external-network guard for every test file.");
+}
+if (!vitestConfig.includes("allowOnly: false")) {
+  fail("Vitest must reject .only tests in CI.");
 }
 
 const ci = read(".github/workflows/ci.yml");
 const release = read(".github/workflows/release.yml");
 for (const [label, workflow] of [["CI", ci], ["Release", release]]) {
-  for (const required of ["validation:contract", "run-isolated-tests.mjs", "verify-test-sensitivity.mjs", "pnpm audit --audit-level=high"]) {
-    if (!workflow.includes(required)) fail(`${label} workflow is missing required validation gate: ${required}`);
+  for (const required of [
+    "validation:contract",
+    "typecheck:tests",
+    "run-isolated-tests.mjs",
+    "verify-test-sensitivity.mjs",
+    "pnpm audit --audit-level=high",
+    "permissions:\n  contents: read",
+    "persist-credentials: false",
+  ]) {
+    if (!workflow.includes(required)) fail(`${label} workflow is missing required validation/hardening contract: ${required}`);
   }
   if (/uses:\s+[^\n]+@v\d+\b/.test(workflow)) {
     fail(`${label} workflow uses a moving major-version action tag instead of an immutable commit SHA.`);
@@ -61,4 +81,4 @@ for (const testFile of discovered.filter((file) => file !== probe)) {
   }
 }
 
-console.log(`[validation-contract] PASS: ${discovered.length - 1} repository tests share Vitest discovery, blocking scripts use isolated execution, workflows contain the same core gates, actions are SHA-pinned, and no skipped/only/todo tests were found.`);
+console.log(`[validation-contract] PASS: ${discovered.length - 1} repository tests share Vitest discovery; blocking scripts use isolated execution; test TypeScript is statically checked; the network guard and allowOnly protection are mandatory; CI/Release share core gates; workflow credentials/permissions are minimized; actions are SHA-pinned; and no skipped/only/todo tests were found.`);
