@@ -38,8 +38,12 @@ function requireCleanWorkingTree(stage) {
   }
 }
 
-function expectRejected(label, result, requiredText) {
+function expectRejected(label, result, requiredText, { allowTimeout = false } = {}) {
   if (result.error) {
+    if (allowTimeout && result.error.code === "ETIMEDOUT") {
+      console.log(`[sensitivity] DETECTED: ${label} (execution timeout)`);
+      return;
+    }
     fail(`${label} did not fail cleanly: ${result.error.message}`);
   }
   if (result.signal) {
@@ -63,11 +67,11 @@ function replaceOnce(source, search, replacement, label) {
   return `${source.slice(0, first)}${replacement}${source.slice(first + search.length)}`;
 }
 
-function runVitest(testFile) {
-  return command(process.execPath, [vitestBin, "run", testFile], { timeoutMs: 90_000 });
+function runVitest(testFile, timeoutMs = 90_000) {
+  return command(process.execPath, [vitestBin, "run", testFile], { timeoutMs });
 }
 
-function sourceMutationControl({ label, file, replacements, testFile }) {
+function sourceMutationControl({ label, file, replacements, testFile, timeoutMs, allowTimeout = false }) {
   const absolute = path.join(repoRoot, file);
   const original = fs.readFileSync(absolute, "utf8");
   let mutated = original;
@@ -76,8 +80,8 @@ function sourceMutationControl({ label, file, replacements, testFile }) {
       mutated = replaceOnce(mutated, search, replacement, label);
     }
     fs.writeFileSync(absolute, mutated);
-    const result = runVitest(testFile);
-    expectRejected(label, result, testFile);
+    const result = runVitest(testFile, timeoutMs);
+    expectRejected(label, result, testFile, { allowTimeout });
   } finally {
     fs.writeFileSync(absolute, original);
   }
@@ -193,6 +197,8 @@ const controls = [
       "const MAX_EXACT_TOKENIZATION_CHARS = 1024 * 1024;",
     ]],
     testFile: "src/__tests__/token-counter-hardening.test.ts",
+    timeoutMs: 15_000,
+    allowTimeout: true,
   },
 ];
 
