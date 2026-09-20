@@ -1,0 +1,83 @@
+name: Apply retroactive audit fixes
+
+on:
+  push:
+    branches: [feat/x402-service-runtime]
+    paths: [.github/workflows/patch-retroactive-audit.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/x402-service-runtime
+      - uses: actions/setup-python@v5
+      - name: Patch deterministic tests and validation scripts
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json
+
+          # 1) Keep unit tests off the public Base RPC by mocking registry discovery
+          # for loop classification tests. The production registry implementation is
+          # covered separately by deterministic range tests below.
+          p = Path('src/__tests__/loop.test.ts')
+          s = p.read_text()
+          marker = 'import type { AutomatonDatabase, AgentTurn, AgentState } from "../types.js";\n'
+          mock = '''import type { AutomatonDatabase, AgentTurn, AgentState } from "../types.js";\n\nvi.mock("../registry/erc8004.js", async (importOriginal) => {\n  const actual = await importOriginal<typeof import("../registry/erc8004.js")>();\n  return {\n    ...actual,\n    getTotalAgents: vi.fn(async () => 0),\n    getRegisteredAgentsByEvents: vi.fn(async () => []),\n    queryAgent: vi.fn(async () => null),\n  };\n});\n'''
+          if marker not in s:
+              raise SystemExit('loop import marker not found')
+          if 'vi.mock("../registry/erc8004.js"' not in s:
+              s = s.replace(marker, mock, 1)
+          s = s.replace('it("discover_agents turns are retained in context (not classified as idle)", { timeout: 180_000 }, async () => {', 'it("discover_agents turns are retained in context (not classified as idle)", async () => {')
+          p.write_text(s)
+
+          # 2) Respect the observed Base public RPC eth_getLogs limit. A 1,999 block
+          # difference is exactly 2,000 blocks inclusive. Keep the previous ~50-call
+          # work budget rather than scanning 500k blocks in CI/runtime by default.
+          p = Path('src/registry/erc8004.ts')
+          s = p.read_text()
+          s = s.replace('// Scan last 500,000 blocks (~11.5 days on Base at 2s blocks)\n    const earliestBlock = currentBlock > 500_000n ? currentBlock - 500_000n : 0n;\n\n    // Paginate backward in ≤10K-block chunks (newest-first).\n    // Base public RPC enforces a 10,000-block limit on eth_getLogs.\n    const MAX_BLOCK_RANGE = 10_000n;', '// Scan a bounded recent window. The public Base RPC currently limits\n    // eth_getLogs to 2,000 blocks inclusive, so a 1,999-block difference is\n    // the largest portable range. Cap the default work at roughly 50 chunks.\n    const MAX_BLOCK_RANGE = 1_999n;\n    const MAX_SCAN_CHUNKS = 50n;\n    const maxLookback = MAX_BLOCK_RANGE * MAX_SCAN_CHUNKS;\n    const earliestBlock = currentBlock > maxLookback ? currentBlock - maxLookback : 0n;')
+          s = s.replace('const scanFrom = scanTo - MAX_BLOCK_RANGE > earliestBlock\n        ? scanTo - MAX_BLOCK_RANGE\n        : earliestBlock;', 'const scanFrom = scanTo - MAX_BLOCK_RANGE > earliestBlock\n        ? scanTo - MAX_BLOCK_RANGE\n        : earliestBlock;')
+          if 'const MAX_BLOCK_RANGE = 10_000n;' in s:
+              raise SystemExit('old ERC-8004 range still present')
+          p.write_text(s)
+
+          # 3) Replace ineffective Vitest --grep scripts with explicit deterministic suites.
+          p = Path('package.json')
+          package = json.loads(p.read_text())
+          scripts = package['scripts']
+          scripts['test:security'] = 'vitest run src/__tests__/command-injection.test.ts src/__tests__/injection-defense.test.ts src/__tests__/policy-engine.test.ts src/__tests__/policy-regression-audit.test.ts src/__tests__/authority-rules.test.ts src/__tests__/path-protection.test.ts src/__tests__/tools-security.test.ts src/__tests__/skills-hardening.test.ts src/__tests__/orchestration/local-worker-security.test.ts'
+          scripts['test:financial'] = 'vitest run src/__tests__/financial.test.ts src/__tests__/spend-tracker.test.ts src/__tests__/business-runtime.test.ts src/__tests__/business-intelligence.test.ts src/__tests__/owner-control.test.ts'
+          scripts['test:regression'] = 'vitest run src/__tests__/business-runtime.test.ts src/__tests__/business-intelligence.test.ts src/__tests__/production-runtime.test.ts src/__tests__/owner-control.test.ts src/__tests__/opportunity-acquisition.test.ts src/__tests__/command-injection.test.ts src/__tests__/policy-engine.test.ts src/__tests__/policy-regression-audit.test.ts'
+          p.write_text(json.dumps(package, indent=2) + '\n')
+
+          # 4) Make CI fail on a timeout. Once live network work is removed from unit
+          # tests, a hung suite is a defect, not an acceptable success condition.
+          p = Path('.github/workflows/ci.yml')
+          s = p.read_text()
+          start = s.index('      - name: Run opportunity acquisition regression tests')
+          end = s.index('\n\n  security-audit:', start)
+          replacement = '''      - name: Run PR1-PR5 regression suite\n        run: pnpm run test:regression\n      - name: Run full test suite\n        timeout-minutes: 6\n        run: pnpm test\n      - name: Run security regression suite\n        run: pnpm run test:security\n      - name: Run financial regression suite\n        run: pnpm run test:financial'''
+          s = s[:start] + replacement + s[end:]
+          p.write_text(s)
+
+          # 5) Harden release validation the same way; release tags must not use a
+          # weaker test path than pull requests.
+          p = Path('.github/workflows/release.yml')
+          s = p.read_text()
+          s = s.replace('      - run: pnpm run typecheck\n      - run: pnpm test\n      - run: pnpm run build\n', '      - run: pnpm run typecheck\n      - run: pnpm run build\n      - run: pnpm run test:regression\n      - run: pnpm run test:security\n      - run: pnpm run test:financial\n      - run: pnpm test\n      - run: pnpm audit --audit-level=high\n')
+          p.write_text(s)
+          PY
+      - name: Commit fixes
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/__tests__/loop.test.ts src/registry/erc8004.ts package.json .github/workflows/ci.yml .github/workflows/release.yml
+          git commit -m "fix: close retroactive CI validation gaps"
+          git push origin HEAD:feat/x402-service-runtime
