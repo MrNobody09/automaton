@@ -28,13 +28,7 @@
     "url": "https://github.com/Conway-Research/automaton.git"
   },
   "homepage": "https://conway.tech",
-  "keywords": [
-    "autonomous-agent",
-    "sovereign-ai",
-    "web4",
-    "conway",
-    "self-replicating"
-  ],
+  "keywords": ["autonomous-agent", "sovereign-ai", "web4", "conway", "self-replicating"],
   "license": "MIT",
   "packageManager": "pnpm@10.28.1",
   "scripts": {
@@ -43,11 +37,12 @@
     "test": "node scripts/run-isolated-tests.mjs",
     "typecheck": "tsc --noEmit",
     "test:coverage": "vitest run --coverage",
-    "test:security": "vitest run src/__tests__/command-injection.test.ts src/__tests__/injection-defense.test.ts src/__tests__/policy-engine.test.ts src/__tests__/policy-regression-audit.test.ts src/__tests__/authority-rules.test.ts src/__tests__/path-protection.test.ts src/__tests__/tools-security.test.ts src/__tests__/skills-hardening.test.ts src/__tests__/orchestration/local-worker-security.test.ts",
-    "test:financial": "vitest run src/__tests__/financial.test.ts src/__tests__/spend-tracker.test.ts src/__tests__/business-runtime.test.ts src/__tests__/business-intelligence.test.ts src/__tests__/owner-control.test.ts",
-    "test:regression": "vitest run src/__tests__/business-runtime.test.ts src/__tests__/business-intelligence.test.ts src/__tests__/production-runtime.test.ts src/__tests__/owner-control.test.ts src/__tests__/opportunity-acquisition.test.ts src/__tests__/command-injection.test.ts src/__tests__/policy-engine.test.ts src/__tests__/policy-regression-audit.test.ts src/__tests__/loop.test.ts src/__tests__/heartbeat.test.ts",
+    "test:security": "pnpm test",
+    "test:financial": "pnpm test",
+    "test:regression": "pnpm test",
     "test:isolated": "node scripts/run-isolated-tests.mjs",
     "test:ci": "node scripts/run-isolated-tests.mjs",
+    "validation:contract": "node scripts/verify-validation-contract.mjs",
     "business:register": "tsx scripts/register-business-tools.ts",
     "production:health": "node dist/production/health-cli.js",
     "production:backup": "node dist/production/backup-cli.js",
@@ -78,14 +73,9 @@
     "typescript": "^5.9.3",
     "vitest": "^3.2.6"
   },
-  "engines": {
-    "node": ">=20.0.0"
-  },
+  "engines": { "node": ">=20.0.0" },
   "pnpm": {
-    "onlyBuiltDependencies": [
-      "better-sqlite3",
-      "esbuild"
-    ],
+    "onlyBuiltDependencies": ["better-sqlite3", "esbuild"],
     "overrides": {
       "rollup@>=4.0.0 <4.59.0": "4.59.0",
       "vite@<=6.4.2": "6.4.3",

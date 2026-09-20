@@ -4,7 +4,8 @@ export default defineConfig({
   test: {
     testTimeout: 30_000,
     teardownTimeout: 5_000,
-    include: ["**/*.{test,spec}.{ts,tsx,js,jsx,mjs,cjs}"],
+    allowOnly: false,
+    include: ["**/*.{test,spec}.{ts,tsx,js,jsx,mjs,cjs,mts,cts}"],
     exclude: [
       "**/.git/**",
       "**/.pnpm-store/**",
@@ -12,6 +13,7 @@ export default defineConfig({
       "**/dist/**",
       "**/coverage/**",
     ],
+    setupFiles: ["./test/setup/network-guard.ts"],
     coverage: {
       provider: "v8",
       include: ["src/**/*.ts"],
