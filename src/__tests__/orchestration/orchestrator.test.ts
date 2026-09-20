@@ -8,8 +8,6 @@ import { ColonyMessaging } from "../../orchestration/messaging.js";
 import type { AutomatonDatabase } from "../../types.js";
 import { createInMemoryDb } from "./test-db.js";
 
-// ─── Fixtures ───────────────────────────────────────────────────
-
 const IDENTITY = {
   name: "test",
   address: "0x1234" as any,
@@ -160,8 +158,6 @@ function getOrchestratorState(db: BetterSqlite3.Database): Record<string, unknow
   }
 }
 
-// ─── Tests ──────────────────────────────────────────────────────
-
 describe("orchestration/Orchestrator", () => {
   let db: BetterSqlite3.Database;
 
@@ -173,8 +169,6 @@ describe("orchestration/Orchestrator", () => {
     db.close();
   });
 
-  // ─── tick() phase transitions ────────────────────────────────
-
   describe("tick() phase transitions", () => {
     it("idle with no goals stays idle", async () => {
       const orc = makeOrchestrator(db);
@@ -185,11 +179,9 @@ describe("orchestration/Orchestrator", () => {
 
     it("idle with active goal transitions to classifying", async () => {
       insertGoal(db, { status: "active" });
-      // Force inference to return low step count so classifying resolves cleanly
       const inference = makeInference({ estimatedSteps: 2 });
       const orc = makeOrchestrator(db, { inference: inference as any });
       const result = await orc.tick();
-      // After classifying (simple goal) -> executing phase saved; result shows executing
       expect(["classifying", "executing"]).toContain(result.phase);
     });
 
@@ -205,38 +197,30 @@ describe("orchestration/Orchestrator", () => {
     it("classifying with complex goal (>3 steps) transitions to planning", async () => {
       const goalId = insertGoal(db, { title: "Complex Goal", description: "Needs multiple coordinated steps" });
       setOrchestratorState(db, { phase: "classifying", goalId, replanCount: 0, failedTaskId: null, failedError: null });
-
-      // classifyComplexity returns high step count → classifying saves "planning" phase
       const inference = makeInference({ estimatedSteps: 5 });
-
       const orc = makeOrchestrator(db, { inference: inference as any });
       const result = await orc.tick();
-      // One tick: classifying detects >3 steps → transitions to planning
       expect(result.phase).toBe("planning");
     });
 
     it("planning phase calls inference and transitions to plan_review", async () => {
       const goalId = insertGoal(db, { title: "Complex Goal", description: "Needs multiple coordinated steps" });
       setOrchestratorState(db, { phase: "planning", goalId, replanCount: 0, failedTaskId: null, failedError: null });
-
-      // planGoal calls inference.chat once
       const inference = {
         chat: vi.fn().mockResolvedValueOnce({
           content: JSON.stringify({
             analysis: "Analysis text",
             strategy: "Strategy text",
             customRoles: [],
-            tasks: [
-              {
-                title: "Task One",
-                description: "Do the first thing",
-                agentRole: "generalist",
-                dependencies: [],
-                estimatedCostCents: 50,
-                priority: 50,
-                timeoutMs: 60000,
-              },
-            ],
+            tasks: [{
+              title: "Task One",
+              description: "Do the first thing",
+              agentRole: "generalist",
+              dependencies: [],
+              estimatedCostCents: 50,
+              priority: 50,
+              timeoutMs: 60000,
+            }],
             risks: [],
             estimatedTotalCostCents: 50,
             estimatedTimeMinutes: 10,
@@ -244,7 +228,6 @@ describe("orchestration/Orchestrator", () => {
           usage: {},
         }),
       };
-
       const orc = makeOrchestrator(db, { inference: inference as any });
       const result = await orc.tick();
       expect(result.phase).toBe("plan_review");
@@ -254,8 +237,6 @@ describe("orchestration/Orchestrator", () => {
       const goalId = insertGoal(db);
       insertTask(db, { goalId, title: "task-one", description: "Do something" });
       setOrchestratorState(db, { phase: "plan_review", goalId, replanCount: 0, failedTaskId: null, failedError: null });
-
-      // Store a valid plan in KV under the plan key
       const plan = {
         analysis: "Analysis",
         strategy: "Strategy",
@@ -269,7 +250,6 @@ describe("orchestration/Orchestrator", () => {
         `orchestrator.plan.${goalId}`,
         JSON.stringify(plan),
       );
-
       const orc = makeOrchestrator(db);
       const result = await orc.tick();
       expect(result.phase).toBe("executing");
@@ -279,8 +259,6 @@ describe("orchestration/Orchestrator", () => {
       const goalId = insertGoal(db);
       insertTask(db, { goalId, title: "existing-task", description: "Do something" });
       setOrchestratorState(db, { phase: "plan_review", goalId, replanCount: 0, failedTaskId: null, failedError: null });
-      // No plan in KV — should skip review and go to executing
-
       const orc = makeOrchestrator(db);
       const result = await orc.tick();
       expect(result.phase).toBe("executing");
@@ -306,13 +284,9 @@ describe("orchestration/Orchestrator", () => {
       });
       const orc = makeOrchestrator(db);
       const result = await orc.tick();
-      // handleFailedPhase marks the goal as failed and resets to idle
-      // so the orchestrator can pick up other active goals.
       expect(result.phase).toBe("idle");
     });
   });
-
-  // ─── matchTaskToAgent ────────────────────────────────────────
 
   describe("matchTaskToAgent", () => {
     function makeTask(goalId: string, overrides: Partial<{ agentRole: string; id: string }> = {}) {
@@ -374,10 +348,7 @@ describe("orchestration/Orchestrator", () => {
         getBestForTask: vi.fn().mockReturnValue(null),
       });
       const spawnAgent = vi.fn().mockResolvedValue({ address: "0xspawned", name: "Spawned", sandboxId: "sb-2" });
-      const orc = makeOrchestrator(db, {
-        agentTracker,
-        config: { spawnAgent },
-      });
+      const orc = makeOrchestrator(db, { agentTracker, config: { spawnAgent } });
       const result = await orc.matchTaskToAgent(makeTask(goalId));
       expect(result.agentAddress).toBe("0xspawned");
       expect(result.spawned).toBe(true);
@@ -387,19 +358,14 @@ describe("orchestration/Orchestrator", () => {
 
     it("falls back to busy agent when spawn is disabled", async () => {
       const goalId = insertGoal(db);
-      // Insert a running child into the DB
       db.prepare(
         "INSERT INTO children (id, name, address, sandbox_id, genesis_prompt, creator_message, funded_amount_cents, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       ).run(ulid(), "BusyAgent", "0xbusy", "sb-3", "prompt", "msg", 0, "running", new Date().toISOString());
-
       const agentTracker = makeAgentTracker({
         getIdle: vi.fn().mockReturnValue([]),
         getBestForTask: vi.fn().mockReturnValue(null),
       });
-      const orc = makeOrchestrator(db, {
-        agentTracker,
-        config: { disableSpawn: true },
-      });
+      const orc = makeOrchestrator(db, { agentTracker, config: { disableSpawn: true } });
       const result = await orc.matchTaskToAgent(makeTask(goalId));
       expect(result.agentAddress).toBe("0xbusy");
       expect(result.spawned).toBe(false);
@@ -411,20 +377,13 @@ describe("orchestration/Orchestrator", () => {
         getIdle: vi.fn().mockReturnValue([]),
         getBestForTask: vi.fn().mockReturnValue(null),
       });
-      const orc = makeOrchestrator(db, {
-        agentTracker,
-        config: { disableSpawn: true },
-      });
-      // When no child agents are available, matchTaskToAgent falls back to
-      // self-assigning the task to the parent identity.
+      const orc = makeOrchestrator(db, { agentTracker, config: { disableSpawn: true } });
       const result = await orc.matchTaskToAgent(makeTask(goalId));
       expect(result.agentAddress).toBe(IDENTITY.address);
       expect(result.agentName).toBe(IDENTITY.name);
       expect(result.spawned).toBe(false);
     });
   });
-
-  // ─── fundAgentForTask ────────────────────────────────────────
 
   describe("fundAgentForTask", () => {
     function makeTaskWithCost(goalId: string, estimatedCostCents: number) {
@@ -471,9 +430,7 @@ describe("orchestration/Orchestrator", () => {
 
     it("throws when fundChild reports failure", async () => {
       const goalId = insertGoal(db);
-      const funding = makeFunding({
-        fundChild: vi.fn().mockResolvedValue({ success: false }),
-      });
+      const funding = makeFunding({ fundChild: vi.fn().mockResolvedValue({ success: false }) });
       const orc = makeOrchestrator(db, { funding, config: { defaultTaskFundingCents: 25 } });
       await expect(orc.fundAgentForTask("0xagent", makeTaskWithCost(goalId, 25))).rejects.toThrow(
         "Funding transfer failed for 0xagent",
@@ -481,11 +438,9 @@ describe("orchestration/Orchestrator", () => {
     });
   });
 
-  // ─── collectResults ──────────────────────────────────────────
-
   describe("collectResults", () => {
     function buildMessagingWithResults(
-      raw: BetterSqlite3.Database,
+      _raw: BetterSqlite3.Database,
       messages: Array<{ type: string; content: string }>,
     ) {
       const processedMessages = messages.map((msg) => ({
@@ -506,13 +461,11 @@ describe("orchestration/Orchestrator", () => {
         success: true,
       }));
 
-      const messaging = {
+      return {
         processInbox: vi.fn().mockResolvedValue(processedMessages),
         createMessage: vi.fn().mockReturnValue({}),
         send: vi.fn().mockResolvedValue(undefined),
       } as unknown as ColonyMessaging;
-
-      return messaging;
     }
 
     it("processes task_result messages from inbox", async () => {
@@ -542,38 +495,7 @@ describe("orchestration/Orchestrator", () => {
       const results = await orc.collectResults();
       expect(results).toHaveLength(0);
     });
-
-    function buildMessagingWithResults(
-      _raw: BetterSqlite3.Database,
-      messages: Array<{ type: string; content: string }>,
-    ) {
-      const processedMessages = messages.map((msg) => ({
-        message: {
-          id: ulid(),
-          type: msg.type,
-          from: "0xagent",
-          to: "0x1234",
-          goalId: null,
-          taskId: null,
-          content: msg.content,
-          priority: "normal" as const,
-          requiresResponse: false,
-          expiresAt: null,
-          createdAt: new Date().toISOString(),
-        },
-        handledBy: "handleTaskResult",
-        success: true,
-      }));
-
-      return {
-        processInbox: vi.fn().mockResolvedValue(processedMessages),
-        createMessage: vi.fn().mockReturnValue({}),
-        send: vi.fn().mockResolvedValue(undefined),
-      } as unknown as ColonyMessaging;
-    }
   });
-
-  // ─── handleFailure ───────────────────────────────────────────
 
   describe("handleFailure", () => {
     function makeTaskNode(goalId: string, taskId: string) {
@@ -604,14 +526,11 @@ describe("orchestration/Orchestrator", () => {
 
     it("transitions to replanning when task permanently fails and replanCount < maxReplans", async () => {
       const goalId = insertGoal(db, { status: "active" });
-      // max_retries=0 so failTask marks it permanently failed (no retry budget)
       const taskId = insertTask(db, { goalId, status: "running" });
       db.prepare("UPDATE task_graph SET max_retries = 0, retry_count = 0 WHERE id = ?").run(taskId);
       setOrchestratorState(db, { phase: "executing", goalId, replanCount: 0, failedTaskId: null, failedError: null });
-
       const orc = makeOrchestrator(db, { config: { maxReplans: 3 } });
       await orc.handleFailure(makeTaskNode(goalId, taskId), "some error");
-
       const state = getOrchestratorState(db);
       expect(state?.phase).toBe("replanning");
       expect(state?.failedTaskId).toBe(taskId);
@@ -620,14 +539,11 @@ describe("orchestration/Orchestrator", () => {
 
     it("transitions to failed when replanCount >= maxReplans", async () => {
       const goalId = insertGoal(db, { status: "active" });
-      // max_retries=0 so failTask marks it permanently failed (no retry budget)
       const taskId = insertTask(db, { goalId, status: "running" });
       db.prepare("UPDATE task_graph SET max_retries = 0, retry_count = 0 WHERE id = ?").run(taskId);
       setOrchestratorState(db, { phase: "executing", goalId, replanCount: 3, failedTaskId: null, failedError: null });
-
       const orc = makeOrchestrator(db, { config: { maxReplans: 3 } });
       await orc.handleFailure(makeTaskNode(goalId, taskId), "fatal");
-
       const state = getOrchestratorState(db);
       expect(state?.phase).toBe("failed");
     });
@@ -635,14 +551,10 @@ describe("orchestration/Orchestrator", () => {
     it("retries task when retry budget allows (maxRetries > retryCount)", async () => {
       const goalId = insertGoal(db, { status: "active" });
       const taskId = insertTask(db, { goalId, status: "running" });
-      // Insert with retries available
       db.prepare("UPDATE task_graph SET max_retries = 3, retry_count = 0 WHERE id = ?").run(taskId);
       setOrchestratorState(db, { phase: "executing", goalId, replanCount: 0, failedTaskId: null, failedError: null });
-
       const orc = makeOrchestrator(db, { config: { maxReplans: 3 } });
       await orc.handleFailure(makeTaskNode(goalId, taskId), "transient");
-
-      // Task should have been retried (status pending or blocked, not necessarily failed)
       const taskRow = db.prepare("SELECT status FROM task_graph WHERE id = ?").get(taskId) as
         | { status: string }
         | undefined;
@@ -650,25 +562,21 @@ describe("orchestration/Orchestrator", () => {
     });
   });
 
-  // ─── handlePlanReviewPhase ───────────────────────────────────
-
   describe("handlePlanReviewPhase (via tick)", () => {
     function storePlan(db: BetterSqlite3.Database, goalId: string, planOverrides: Record<string, unknown> = {}): void {
       const plan = {
         analysis: "Analysis",
         strategy: "Strategy",
         customRoles: [],
-        tasks: [
-          {
-            title: "Task One",
-            description: "Do something",
-            agentRole: "generalist",
-            dependencies: [],
-            estimatedCostCents: 100,
-            priority: 50,
-            timeoutMs: 60000,
-          },
-        ],
+        tasks: [{
+          title: "Task One",
+          description: "Do something",
+          agentRole: "generalist",
+          dependencies: [],
+          estimatedCostCents: 100,
+          priority: 50,
+          timeoutMs: 60000,
+        }],
         risks: [],
         estimatedTotalCostCents: 100,
         estimatedTimeMinutes: 5,
@@ -683,9 +591,8 @@ describe("orchestration/Orchestrator", () => {
     it("approved plan transitions from plan_review to executing", async () => {
       const goalId = insertGoal(db);
       insertTask(db, { goalId, title: "t1", description: "desc" });
-      storePlan(db, goalId, { estimatedTotalCostCents: 100 }); // under auto threshold
+      storePlan(db, goalId, { estimatedTotalCostCents: 100 });
       setOrchestratorState(db, { phase: "plan_review", goalId, replanCount: 0, failedTaskId: null, failedError: null });
-
       const orc = makeOrchestrator(db);
       const result = await orc.tick();
       expect(result.phase).toBe("executing");
@@ -694,9 +601,7 @@ describe("orchestration/Orchestrator", () => {
     it("rejected plan (malformed/no tasks in plan) transitions to executing when KV missing", async () => {
       const goalId = insertGoal(db);
       insertTask(db, { goalId, title: "t1", description: "desc" });
-      // No plan in KV — handlePlanReviewPhase returns executing
       setOrchestratorState(db, { phase: "plan_review", goalId, replanCount: 0, failedTaskId: null, failedError: null });
-
       const orc = makeOrchestrator(db);
       const result = await orc.tick();
       expect(result.phase).toBe("executing");
@@ -707,18 +612,9 @@ describe("orchestration/Orchestrator", () => {
       insertTask(db, { goalId, title: "t1", description: "desc" });
       storePlan(db, goalId);
       setOrchestratorState(db, { phase: "plan_review", goalId, replanCount: 0, failedTaskId: null, failedError: null });
-
-      // We need reviewPlan to throw "awaiting human approval". The orchestrator calls it with mode: "auto".
-      // To get supervised behavior we mock the plan-mode module.
-      // The simplest way: store a plan that will trigger the supervised path by mocking vi.mock at module level.
-      // Instead we test the error-catch path by making the orchestrator's handlePlanReviewPhase catch it:
-      // The orchestrator calls reviewPlan with mode:"auto". In auto mode it always approves.
-      // To test supervised mode catching, we verify the catch branch indirectly:
-      // inject a plan with a very high cost to ensure the auto-approve path runs.
       storePlan(db, goalId, { estimatedTotalCostCents: 9999 });
       const orc = makeOrchestrator(db);
       const result = await orc.tick();
-      // auto mode approves above threshold too, so we get executing
       expect(result.phase).toBe("executing");
     });
   });
