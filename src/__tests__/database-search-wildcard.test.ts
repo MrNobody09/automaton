@@ -18,6 +18,7 @@ import {
   proceduralUpsert,
 } from "../state/database.js";
 import { createDatabase } from "../state/database.js";
+import type { ProceduralStep } from "../types.js";
 import Database from "better-sqlite3";
 
 let dbPath: string;
@@ -27,6 +28,16 @@ let automatonDb: ReturnType<typeof createDatabase>;
 function makeTmpDbPath(): string {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "automaton-wildcard-test-"));
   return path.join(tmpDir, "test.db");
+}
+
+function step(order: number, description: string): ProceduralStep {
+  return {
+    order,
+    description,
+    tool: null,
+    argsTemplate: null,
+    expectedOutcome: null,
+  };
 }
 
 beforeEach(() => {
@@ -65,7 +76,6 @@ describe("episodicSearch wildcard escaping", () => {
       classification: "productive",
     });
 
-    // Search for literal "100%" — should only match the second entry
     const results = episodicSearch(db, "100%");
     expect(results.length).toBe(1);
     expect(results[0].summary).toContain("100%");
@@ -95,7 +105,6 @@ describe("episodicSearch wildcard escaping", () => {
       classification: "productive",
     });
 
-    // Search for "file_name" — should match only the underscore entry, not "filename"
     const results = episodicSearch(db, "file_name");
     expect(results.length).toBe(1);
     expect(results[0].summary).toBe("file_name found");
@@ -123,7 +132,6 @@ describe("semanticSearch wildcard escaping", () => {
       lastVerifiedAt: null,
     });
 
-    // Search for literal "95%" — should only match the first entry
     const results = semanticSearch(db, "95%");
     expect(results.length).toBe(1);
     expect(results[0].value).toContain("95%");
@@ -149,7 +157,6 @@ describe("semanticSearch wildcard escaping", () => {
       lastVerifiedAt: null,
     });
 
-    // Search for "var_name" — _ should NOT match arbitrary character
     const results = semanticSearch(db, "var_name");
     expect(results.length).toBe(1);
     expect(results[0].key).toBe("var_name");
@@ -186,15 +193,14 @@ describe("proceduralSearch wildcard escaping", () => {
     proceduralUpsert(db, {
       name: "deploy_100pct_coverage",
       description: "Deploy with 100% coverage",
-      steps: ["test", "deploy"],
+      steps: [step(1, "test"), step(2, "deploy")],
     });
     proceduralUpsert(db, {
       name: "deploy_basic",
       description: "Basic deployment",
-      steps: ["deploy"],
+      steps: [step(1, "deploy")],
     });
 
-    // Search for "100%" — should only match the first
     const results = proceduralSearch(db, "100%");
     expect(results.length).toBe(1);
     expect(results[0].description).toContain("100%");
@@ -204,15 +210,14 @@ describe("proceduralSearch wildcard escaping", () => {
     proceduralUpsert(db, {
       name: "run_tests",
       description: "Run test suite with run_tests command",
-      steps: ["run"],
+      steps: [step(1, "run")],
     });
     proceduralUpsert(db, {
       name: "runXtests",
       description: "Run X tests",
-      steps: ["run"],
+      steps: [step(1, "run")],
     });
 
-    // Search for "run_tests" — _ should NOT match arbitrary character
     const results = proceduralSearch(db, "run_tests");
     expect(results.length).toBe(1);
     expect(results[0].name).toBe("run_tests");
