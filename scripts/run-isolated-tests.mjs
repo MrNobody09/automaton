@@ -6,13 +6,20 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const testsRoot = join(repoRoot, "src", "__tests__");
 const shardIndex = Number.parseInt(process.argv[2] ?? "1", 10);
 const shardTotal = Number.parseInt(process.argv[3] ?? "1", 10);
 const perFileTimeoutMs = Number.parseInt(
   process.env.TEST_FILE_TIMEOUT_MS ?? "120000",
   10,
 );
+const excludedDirectories = new Set([
+  ".git",
+  ".pnpm-store",
+  "node_modules",
+  "dist",
+  "coverage",
+]);
+const testFilePattern = /\.(?:test|spec)\.(?:ts|tsx|js|jsx|mjs|cjs)$/;
 
 function fail(message) {
   console.error(`[isolated-tests] ${message}`);
@@ -32,22 +39,24 @@ if (!Number.isInteger(perFileTimeoutMs) || perFileTimeoutMs < 1_000) {
 function collectTests(dir) {
   const result = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isDirectory() && excludedDirectories.has(entry.name)) continue;
+
     const path = join(dir, entry.name);
     if (entry.isDirectory()) {
       result.push(...collectTests(path));
-    } else if (entry.isFile() && /\.test\.(?:ts|tsx|js|mjs|cjs)$/.test(entry.name)) {
+    } else if (entry.isFile() && testFilePattern.test(entry.name)) {
       result.push(path);
     }
   }
   return result;
 }
 
-const allTests = collectTests(testsRoot)
+const allTests = collectTests(repoRoot)
   .map((path) => relative(repoRoot, path).replaceAll("\\", "/"))
   .sort((a, b) => a.localeCompare(b));
 
 if (allTests.length === 0) {
-  fail(`No test files found under ${relative(repoRoot, testsRoot)}.`);
+  fail("No test/spec files found in the repository.");
 }
 
 const selected = allTests.filter((_, index) => index % shardTotal === shardIndex - 1);
