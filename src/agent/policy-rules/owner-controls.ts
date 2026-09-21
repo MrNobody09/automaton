@@ -1,11 +1,11 @@
 import type { PolicyRequest, PolicyRule, PolicyRuleResult } from "../../types.js";
 import { isSpendingPaused, isTradingPaused } from "../../control/state.js";
 
-const OUTBOUND_SPEND_TOOLS = new Set([
-  "transfer_credits",
-  "topup_credits",
-  "fund_child",
-  "x402_fetch",
+// Exceptional spend-capable tools that are not categorized as `financial`.
+// Financial tools are protected generically below so adding a new caution or
+// dangerous financial tool cannot silently bypass the owner spending pause.
+const NON_FINANCIAL_SPEND_TOOLS = new Set([
+  "create_sandbox",
   "register_domain",
 ]);
 
@@ -17,12 +17,9 @@ function getRawDb(request: PolicyRequest) {
   return request.context?.db?.raw;
 }
 
-function isDangerousFinancialAction(request: PolicyRequest): boolean {
-  return request.tool.category === "financial" && request.tool.riskLevel === "dangerous";
-}
-
 function isOutboundSpendAction(request: PolicyRequest): boolean {
-  return OUTBOUND_SPEND_TOOLS.has(request.tool.name) || isDangerousFinancialAction(request);
+  if (NON_FINANCIAL_SPEND_TOOLS.has(request.tool.name)) return true;
+  return request.tool.category === "financial" && request.tool.riskLevel !== "safe";
 }
 
 function isTradingExecution(request: PolicyRequest): boolean {
@@ -49,9 +46,9 @@ export function createOwnerControlRules(): PolicyRule[] {
       priority: 2,
       appliesTo: { by: "all" },
       evaluate(request: PolicyRequest): PolicyRuleResult | null {
-        // Do not touch owner-control state for unrelated actions. This keeps
-        // independent policy rules composable and prevents a missing control
-        // store from masking command-safety evaluation.
+        // Do not touch owner-control state for unrelated actions. Financial
+        // caution/dangerous tools are automatically classified as spend-capable;
+        // only non-financial exceptions need an explicit entry above.
         if (!isOutboundSpendAction(request)) return null;
 
         const rawDb = getRawDb(request);
