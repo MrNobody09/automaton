@@ -45,6 +45,32 @@ function assertSameTestUniverse(repositoryFiles: string[], vitestFiles: string[]
   }
 }
 
+function assertValidationCodeOwners(): void {
+  const codeOwners = read(".github/CODEOWNERS");
+  const requiredEntries = [
+    "/.github/workflows/ @MrNobody09",
+    "/scripts/run-isolated-tests.ts @MrNobody09",
+    "/scripts/test-discovery.ts @MrNobody09",
+    "/scripts/validation-rules.ts @MrNobody09",
+    "/scripts/verify-validation-contract.ts @MrNobody09",
+    "/scripts/verify-package-artifacts.ts @MrNobody09",
+    "/test/setup/network-guard.ts @MrNobody09",
+    "/vitest.config.ts @MrNobody09",
+    "/package.json @MrNobody09",
+    "/pnpm-lock.yaml @MrNobody09",
+  ];
+  const lines = new Set(
+    codeOwners
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith("#")),
+  );
+  const missing = requiredEntries.filter((entry) => !lines.has(entry));
+  if (missing.length > 0) {
+    throw new Error(`CODEOWNERS must protect validation controls; missing: ${missing.join(", ")}`);
+  }
+}
+
 try {
   for (const foreignLock of ["package-lock.json", "yarn.lock", "bun.lock", "bun.lockb"]) {
     if (fs.existsSync(path.join(repoRoot, foreignLock))) {
@@ -54,6 +80,8 @@ try {
   if (!fs.existsSync(path.join(repoRoot, "pnpm-lock.yaml"))) {
     throw new Error("pnpm-lock.yaml is required.");
   }
+
+  assertValidationCodeOwners();
 
   const packageJson = JSON.parse(read("package.json"));
   validatePackageScripts(packageJson);
@@ -116,7 +144,7 @@ try {
   }
 
   console.log(
-    `[validation-contract] PASS: ${realTests.length} repository test files exactly match Vitest discovery; validation tooling is TypeScript-checked; four CI shards exactly partition discovery; workflow rules are parsed structurally and unit-tested; package scripts are unambiguous; no skipped/only/todo tests were found.`,
+    `[validation-contract] PASS: ${realTests.length} repository test files exactly match Vitest discovery; validation controls are CODEOWNED; validation tooling is TypeScript-checked; four CI shards exactly partition discovery; workflow rules are parsed structurally and unit-tested; package scripts are unambiguous; no skipped/only/todo tests were found.`,
   );
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error));
