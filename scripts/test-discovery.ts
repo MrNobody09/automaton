@@ -1,7 +1,17 @@
 #!/usr/bin/env node
 
+import { readdir } from "node:fs/promises";
 import path from "node:path";
 import { createVitest } from "vitest/node";
+
+const TEST_FILE_PATTERN = /\.(?:test|spec)\.(?:ts|tsx|js|jsx|mjs|cjs|mts|cts)$/i;
+const IGNORED_DIRECTORIES = new Set([
+  ".git",
+  ".pnpm-store",
+  "node_modules",
+  "dist",
+  "coverage",
+]);
 
 export interface VitestProjectTopology {
   name: string;
@@ -18,9 +28,44 @@ function normalizeRelative(repoRoot: string, filePath: string): string {
   const absolute = path.resolve(filePath);
   const relative = path.relative(repoRoot, absolute).replaceAll("\\", "/");
   if (!relative || relative === "." || relative.startsWith("../") || path.isAbsolute(relative)) {
-    throw new Error(`Vitest resolved a path outside the repository: ${filePath}`);
+    throw new Error(`Resolved a path outside the repository: ${filePath}`);
   }
   return relative;
+}
+
+/**
+ * Discover repository test/spec files without consulting Vitest configuration.
+ *
+ * This is deliberately independent from Vitest. If a future config change
+ * accidentally narrows Vitest's include/exclude patterns, validation can
+ * compare the two universes and fail instead of silently accepting fewer tests.
+ * Symlinks are ignored so discovery cannot escape the checked-out repository.
+ */
+export async function discoverRepositoryTestFiles(repoRoot: string): Promise<string[]> {
+  const root = path.resolve(repoRoot);
+  const discovered: string[] = [];
+
+  async function walk(directory: string): Promise<void> {
+    const entries = await readdir(directory, { withFileTypes: true });
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      const absolute = path.join(directory, entry.name);
+
+      if (entry.isDirectory()) {
+        if (IGNORED_DIRECTORIES.has(entry.name)) continue;
+        await walk(absolute);
+        continue;
+      }
+
+      if (!entry.isFile() || !TEST_FILE_PATTERN.test(entry.name)) continue;
+      discovered.push(normalizeRelative(root, absolute));
+    }
+  }
+
+  await walk(root);
+  return [...new Set(discovered)].sort((a, b) => a.localeCompare(b));
 }
 
 export function selectTestShard(
@@ -37,6 +82,7 @@ export function selectTestShard(
   return files.filter((_, index) => index % shardTotal === shardIndex - 1);
 }
 
+/** Inspect what Vitest itself currently believes the test topology to be. */
 export async function inspectVitestTopology(repoRoot: string): Promise<VitestTopology> {
   const vitest = await createVitest(
     "test",
@@ -72,6 +118,7 @@ export async function inspectVitestTopology(repoRoot: string): Promise<VitestTop
   }
 }
 
+/** Canonical runner discovery is filesystem-based, not configuration-based. */
 export async function discoverTestFiles(repoRoot: string): Promise<string[]> {
-  return (await inspectVitestTopology(repoRoot)).files;
+  return discoverRepositoryTestFiles(repoRoot);
 }
