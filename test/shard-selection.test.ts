@@ -1,5 +1,11 @@
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { selectTestShard } from "../scripts/test-discovery.js";
+import {
+  discoverRepositoryTestFiles,
+  selectTestShard,
+} from "../scripts/test-discovery.js";
 
 describe("selectTestShard", () => {
   it("partitions a file list exactly once across four shards", () => {
@@ -25,5 +31,52 @@ describe("selectTestShard", () => {
     expect(() => selectTestShard([], 0, 4)).toThrow("Invalid shard 0/4");
     expect(() => selectTestShard([], 5, 4)).toThrow("Invalid shard 5/4");
     expect(() => selectTestShard([], 1, 0)).toThrow("Invalid shard 1/0");
+  });
+});
+
+describe("discoverRepositoryTestFiles", () => {
+  it("finds nested test/spec files independently and ignores generated/vendor trees", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "automaton-test-discovery-"));
+    try {
+      await mkdir(path.join(root, "src", "nested"), { recursive: true });
+      await mkdir(path.join(root, "node_modules", "vendor"), { recursive: true });
+      await mkdir(path.join(root, "dist"), { recursive: true });
+      await mkdir(path.join(root, "coverage"), { recursive: true });
+
+      await writeFile(path.join(root, "root.test.ts"), "export {};\n");
+      await writeFile(path.join(root, "src", "nested", "feature.spec.mjs"), "export {};\n");
+      await writeFile(path.join(root, "src", "nested", "not-a-test.ts"), "export {};\n");
+      await writeFile(path.join(root, "node_modules", "vendor", "hidden.test.ts"), "export {};\n");
+      await writeFile(path.join(root, "dist", "generated.test.js"), "export {};\n");
+      await writeFile(path.join(root, "coverage", "report.spec.js"), "export {};\n");
+
+      expect(await discoverRepositoryTestFiles(root)).toEqual([
+        "root.test.ts",
+        "src/nested/feature.spec.mjs",
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not follow directory symlinks outside the repository", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "automaton-test-discovery-root-"));
+    const outside = await mkdtemp(path.join(os.tmpdir(), "automaton-test-discovery-outside-"));
+    try {
+      await writeFile(path.join(outside, "external.test.ts"), "export {};\n");
+      try {
+        await symlink(outside, path.join(root, "external-link"), "dir");
+      } catch (error: any) {
+        // Some Windows environments restrict symlink creation for unprivileged
+        // users. The production implementation still ignores symlink entries;
+        // skip only this environment-dependent assertion when creation fails.
+        if (process.platform === "win32" && (error?.code === "EPERM" || error?.code === "EACCES")) return;
+        throw error;
+      }
+      expect(await discoverRepositoryTestFiles(root)).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 });
