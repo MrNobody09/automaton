@@ -70,4 +70,33 @@ describe("retroactive policy regression audit", () => {
     expect(decision.rulesTriggered).toContain("test.throwing_rule");
     db.close();
   });
+
+  it("policy engine denies cyclic arguments instead of throwing during audit hashing", () => {
+    const db = new Database(":memory:");
+    const cyclic: Record<string, unknown> = { value: "test" };
+    cyclic.self = cyclic;
+
+    const engine = new PolicyEngine(db, []);
+    expect(() => engine.evaluate(request({ args: cyclic }))).not.toThrow();
+
+    const decision = engine.evaluate(request({ args: cyclic }));
+    expect(decision).toMatchObject({
+      action: "deny",
+      reasonCode: "POLICY_ARGS_UNSERIALIZABLE",
+    });
+    expect(decision.rulesTriggered).toContain("policy.args_serialization");
+    expect(decision.argsHash).toMatch(/^[0-9a-f]{64}$/);
+    db.close();
+  });
+
+  it("policy engine denies BigInt arguments instead of crashing", () => {
+    const db = new Database(":memory:");
+    const decision = new PolicyEngine(db, []).evaluate(request({ args: { amount: 1n } }));
+
+    expect(decision).toMatchObject({
+      action: "deny",
+      reasonCode: "POLICY_ARGS_UNSERIALIZABLE",
+    });
+    db.close();
+  });
 });
