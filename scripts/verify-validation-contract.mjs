@@ -21,6 +21,13 @@ function isEnabled(value) {
   return value === 1 || value === "1" || value === true || value === "true";
 }
 
+function sameScalarSet(actual, expected) {
+  if (!Array.isArray(actual) || actual.length !== expected.length) return false;
+  const normalizedActual = actual.map(String).sort();
+  const normalizedExpected = expected.map(String).sort();
+  return normalizedActual.every((value, index) => value === normalizedExpected[index]);
+}
+
 for (const foreignLock of ["package-lock.json", "yarn.lock", "bun.lock", "bun.lockb"]) {
   if (fs.existsSync(path.join(repoRoot, foreignLock))) {
     fail(`${foreignLock} must not exist: pnpm-lock.yaml is the repository's single dependency lockfile.`);
@@ -56,9 +63,7 @@ if (!fs.existsSync(path.join(repoRoot, "tsconfig.tests.json"))) {
 const topology = await inspectVitestTopology(repoRoot);
 if (topology.projects.length === 0) fail("Vitest did not load any projects.");
 for (const project of topology.projects) {
-  if (project.allowOnly !== false) {
-    fail(`Vitest project ${project.name} must set allowOnly=false.`);
-  }
+  if (project.allowOnly !== false) fail(`Vitest project ${project.name} must set allowOnly=false.`);
   if (!project.setupFiles.includes("test/setup/network-guard.ts")) {
     fail(`Vitest project ${project.name} must load test/setup/network-guard.ts.`);
   }
@@ -74,9 +79,7 @@ function assertPinnedAction(step, label) {
   if (!step || typeof step !== "object" || typeof step.uses !== "string") return;
   const uses = step.uses;
   if (uses.startsWith("./")) return;
-  if (!/^[^@]+@[0-9a-f]{40}$/i.test(uses)) {
-    fail(`${label} action must be pinned to an exact commit SHA: ${uses}`);
-  }
+  if (!/^[^@]+@[0-9a-f]{40}$/i.test(uses)) fail(`${label} action must be pinned to an exact commit SHA: ${uses}`);
 }
 
 function commandOf(step) {
@@ -110,44 +113,32 @@ function validateWorkflow(file, label) {
   if (Object.keys(jobs).length === 0) fail(`${label} workflow must define jobs.`);
 
   for (const [jobName, job] of Object.entries(jobs)) {
-    if (!Array.isArray(job?.steps) || job.steps.length === 0) {
-      fail(`${label} job ${jobName} must define non-empty steps.`);
-    }
+    if (!Array.isArray(job?.steps) || job.steps.length === 0) fail(`${label} job ${jobName} must define non-empty steps.`);
     assertNoExternalTestNetworkEnv(job.env, `${label} job ${jobName} env`);
 
     const checkoutSteps = job.steps.filter((step) => typeof step?.uses === "string" && step.uses.startsWith("actions/checkout@"));
-    if (checkoutSteps.length !== 1) {
-      fail(`${label} job ${jobName} must contain exactly one checkout step.`);
-    }
+    if (checkoutSteps.length !== 1) fail(`${label} job ${jobName} must contain exactly one checkout step.`);
 
     for (const step of job.steps) {
       assertPinnedAction(step, `${label} job ${jobName}`);
       assertNoExternalTestNetworkEnv(step?.env, `${label} job ${jobName} step env`);
-      if (typeof step?.uses === "string" && step.uses.startsWith("actions/checkout@")) {
-        if (step.with?.["persist-credentials"] !== false) {
-          fail(`${label} checkout in job ${jobName} must set persist-credentials: false.`);
-        }
+      if (typeof step?.uses === "string" && step.uses.startsWith("actions/checkout@") && step.with?.["persist-credentials"] !== false) {
+        fail(`${label} checkout in job ${jobName} must set persist-credentials: false.`);
       }
     }
   }
 
-  const requiredExactCommands = [
+  for (const requiredCommand of [
     "pnpm run validation:contract",
     "pnpm run typecheck:tests",
     "node scripts/verify-test-sensitivity.mjs",
     "pnpm audit --audit-level=high",
-  ];
-  for (const requiredCommand of requiredExactCommands) {
+    "pnpm run typecheck",
+    "pnpm run build",
+  ]) {
     if (!workflowHasBlockingCommand(workflow, (command) => command === requiredCommand)) {
       fail(`${label} workflow is missing blocking command: ${requiredCommand}`);
     }
-  }
-
-  if (!workflowHasBlockingCommand(workflow, (command) => command === "pnpm run typecheck")) {
-    fail(`${label} workflow is missing blocking command: pnpm run typecheck`);
-  }
-  if (!workflowHasBlockingCommand(workflow, (command) => command === "pnpm run build")) {
-    fail(`${label} workflow is missing blocking command: pnpm run build`);
   }
   if (!workflowHasBlockingCommand(workflow, (command) => command.startsWith("node scripts/run-isolated-tests.mjs"))) {
     fail(`${label} workflow is missing a blocking isolated full-suite command.`);
@@ -156,8 +147,37 @@ function validateWorkflow(file, label) {
   return workflow;
 }
 
-validateWorkflow(".github/workflows/ci.yml", "CI");
-validateWorkflow(".github/workflows/release.yml", "Release");
+const ciWorkflow = validateWorkflow(".github/workflows/ci.yml", "CI");
+const releaseWorkflow = validateWorkflow(".github/workflows/release.yml", "Release");
+
+const ciBuild = ciWorkflow.jobs?.["build-and-typecheck"];
+if (!sameScalarSet(ciBuild?.strategy?.matrix?.["node-version"], [20, 22])) {
+  fail("CI build-and-typecheck matrix must cover exactly Node 20 and 22.");
+}
+const ciFull = ciWorkflow.jobs?.["isolated-full-suite"];
+if (!sameScalarSet(ciFull?.strategy?.matrix?.["node-version"], [20, 22])) {
+  fail("CI isolated-full-suite matrix must cover exactly Node 20 and 22.");
+}
+if (!sameScalarSet(ciFull?.strategy?.matrix?.shard, [1, 2, 3, 4])) {
+  fail("CI isolated-full-suite matrix must retain exactly shards 1,2,3,4.");
+}
+if (ciFull?.strategy?.["fail-fast"] !== false) {
+  fail("CI isolated-full-suite must keep fail-fast: false so every shard reports independently.");
+}
+if (!Number.isFinite(ciFull?.["timeout-minutes"]) || ciFull["timeout-minutes"] > 15) {
+  fail("CI isolated-full-suite must keep a hard timeout of 15 minutes or less.");
+}
+
+const releaseValidation = releaseWorkflow.jobs?.["release-validation"];
+if (!sameScalarSet(releaseValidation?.strategy?.matrix?.["node-version"], [20, 22])) {
+  fail("Release validation matrix must cover exactly Node 20 and 22.");
+}
+if (releaseValidation?.strategy?.["fail-fast"] !== false) {
+  fail("Release validation must keep fail-fast: false so both supported Node versions report independently.");
+}
+if (!workflowHasBlockingCommand({ jobs: { "release-validation": releaseValidation } }, (command) => command === "node scripts/run-isolated-tests.mjs")) {
+  fail("Release validation matrix must run the complete process-isolated suite on each supported Node version.");
+}
 
 const probe = "validation-topology-probe.test.mjs";
 const probePath = path.join(repoRoot, probe);
@@ -168,16 +188,12 @@ try {
 } finally {
   fs.rmSync(probePath, { force: true });
 }
-if (!discovered.includes(probe)) {
-  fail("Vitest did not discover a root-level test probe; test topology contract is broken.");
-}
+if (!discovered.includes(probe)) fail("Vitest did not discover a root-level test probe; test topology contract is broken.");
 
 const forbiddenModifier = /\b(?:describe|suite|test|it)\s*\.\s*(?:skip|todo|only|skipIf|runIf)\s*\(/;
 for (const testFile of discovered.filter((file) => file !== probe)) {
   const content = read(testFile);
-  if (forbiddenModifier.test(content)) {
-    fail(`${testFile} contains a forbidden skipped/todo/only/conditional test modifier.`);
-  }
+  if (forbiddenModifier.test(content)) fail(`${testFile} contains a forbidden skipped/todo/only/conditional test modifier.`);
 }
 
-console.log(`[validation-contract] PASS: ${discovered.length - 1} repository tests share loaded Vitest topology; pnpm has the only lockfile; every test script uses isolated execution; test TypeScript is statically checked; loaded Vitest projects enforce network setup and allowOnly=false; CI/Release are parsed structurally with fail-closed blocking gates, minimized permissions and checkout credentials, and SHA-pinned actions; no skipped/only/todo tests were found.`);
+console.log(`[validation-contract] PASS: ${discovered.length - 1} repository tests share loaded Vitest topology; pnpm has the only lockfile; every test script uses isolated execution; test TypeScript is statically checked; loaded Vitest projects enforce network setup and allowOnly=false; CI keeps Node 20/22 plus four independent shards; Release independently validates Node 20/22; workflows are structurally fail-closed with minimized permissions, checkout credentials and SHA-pinned actions; no skipped/only/todo tests were found.`);
