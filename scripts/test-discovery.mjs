@@ -12,6 +12,17 @@ function normalizeRelative(repoRoot, filePath) {
   return relative;
 }
 
+export function selectTestShard(files, shardIndex, shardTotal) {
+  if (!Array.isArray(files)) throw new TypeError("files must be an array");
+  if (!Number.isInteger(shardIndex) || !Number.isInteger(shardTotal)) {
+    throw new TypeError("Shard index and shard total must be integers.");
+  }
+  if (shardTotal < 1 || shardIndex < 1 || shardIndex > shardTotal) {
+    throw new RangeError(`Invalid shard ${shardIndex}/${shardTotal}.`);
+  }
+  return files.filter((_, index) => index % shardTotal === shardIndex - 1);
+}
+
 export async function inspectVitestTopology(repoRoot) {
   const vitest = await createVitest(
     "test",

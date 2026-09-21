@@ -4,7 +4,7 @@ import { statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { discoverTestFiles } from "./test-discovery.mjs";
+import { discoverTestFiles, selectTestShard } from "./test-discovery.mjs";
 
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const shardIndex = Number.parseInt(process.argv[2] ?? "1", 10);
@@ -16,20 +16,14 @@ function fail(message) {
   process.exit(1);
 }
 
-if (!Number.isInteger(shardIndex) || !Number.isInteger(shardTotal)) {
-  fail("Shard index and shard total must be integers.");
-}
-if (shardTotal < 1 || shardIndex < 1 || shardIndex > shardTotal) {
-  fail(`Invalid shard ${shardIndex}/${shardTotal}.`);
-}
-if (!Number.isInteger(perFileTimeoutMs) || perFileTimeoutMs < 1_000) {
-  fail("TEST_FILE_TIMEOUT_MS must be an integer >= 1000.");
-}
+if (!Number.isInteger(shardIndex) || !Number.isInteger(shardTotal)) fail("Shard index and shard total must be integers.");
+if (shardTotal < 1 || shardIndex < 1 || shardIndex > shardTotal) fail(`Invalid shard ${shardIndex}/${shardTotal}.`);
+if (!Number.isInteger(perFileTimeoutMs) || perFileTimeoutMs < 1_000) fail("TEST_FILE_TIMEOUT_MS must be an integer >= 1000.");
 
 const allTests = await discoverTestFiles(repoRoot);
 if (allTests.length === 0) fail("Vitest discovered no test/spec files in the repository.");
 
-const selected = allTests.filter((_, index) => index % shardTotal === shardIndex - 1);
+const selected = selectTestShard(allTests, shardIndex, shardTotal);
 if (selected.length === 0) fail(`Shard ${shardIndex}/${shardTotal} has no test files.`);
 
 const vitestBin = join(repoRoot, "node_modules", "vitest", "vitest.mjs");
