@@ -19,6 +19,7 @@ concurrency:
 jobs:
   validation-contract:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
         with:
@@ -44,6 +45,7 @@ jobs:
 
   build-and-typecheck:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -86,6 +88,7 @@ jobs:
 
   security-audit:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
         with:
@@ -106,10 +109,8 @@ jobs:
       - isolated-full-suite
       - security-audit
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
-        with:
-          persist-credentials: false
       - name: Require all authoritative CI jobs
         env:
           VALIDATION_CONTRACT_RESULT: ${{ needs.validation-contract.result }}
