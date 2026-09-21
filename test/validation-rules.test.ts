@@ -14,6 +14,17 @@ function step(run: string) { return { run }; }
 function checkout() { return { uses: CHECKOUT, with: { "persist-credentials": false } }; }
 function action(uses: string) { return { uses }; }
 
+const REQUIRED_CI_COMMAND = `set -euo pipefail
+printf 'validation-contract=%s\\nbuild-and-typecheck=%s\\nisolated-full-suite=%s\\nsecurity-audit=%s\\n' \\
+  "$VALIDATION_CONTRACT_RESULT" \\
+  "$BUILD_AND_TYPECHECK_RESULT" \\
+  "$ISOLATED_FULL_SUITE_RESULT" \\
+  "$SECURITY_AUDIT_RESULT"
+test "$VALIDATION_CONTRACT_RESULT" = "success"
+test "$BUILD_AND_TYPECHECK_RESULT" = "success"
+test "$ISOLATED_FULL_SUITE_RESULT" = "success"
+test "$SECURITY_AUDIT_RESULT" = "success"`;
+
 function ciFixture() {
   return {
     permissions: { contents: "read" },
@@ -29,6 +40,11 @@ function ciFixture() {
         steps: [checkout(), action(SETUP_NODE), action(SETUP_PNPM), step("pnpm exec tsx scripts/run-isolated-tests.ts ${{ matrix.shard }} 4")],
       },
       "security-audit": { steps: [checkout(), action(SETUP_NODE), action(SETUP_PNPM), step("pnpm audit --audit-level=high")] },
+      "required-ci": {
+        if: "always()",
+        needs: ["validation-contract", "build-and-typecheck", "isolated-full-suite", "security-audit"],
+        steps: [checkout(), step(REQUIRED_CI_COMMAND)],
+      },
     },
   };
 }
@@ -82,6 +98,24 @@ describe("typed validation rules", () => {
     const build = workflow.jobs["build-and-typecheck"];
     [build.steps[5], build.steps[6]] = [build.steps[6], build.steps[5]];
     expect(() => validateCiWorkflow(workflow)).toThrow("validation:artifacts must run after build");
+  });
+
+  it("rejects a missing required-ci aggregator", () => {
+    const workflow = ciFixture() as any;
+    delete workflow.jobs["required-ci"];
+    expect(() => validateCiWorkflow(workflow)).toThrow("stable required-ci aggregation job");
+  });
+
+  it("rejects incomplete required-ci dependencies", () => {
+    const workflow = ciFixture();
+    workflow.jobs["required-ci"].needs = ["validation-contract", "build-and-typecheck", "isolated-full-suite"];
+    expect(() => validateCiWorkflow(workflow)).toThrow("depend on every authoritative CI job exactly once");
+  });
+
+  it("rejects a fail-open required-ci result check", () => {
+    const workflow = ciFixture();
+    workflow.jobs["required-ci"].steps[1] = step(REQUIRED_CI_COMMAND.replace('test "$SECURITY_AUDIT_RESULT" = "success"', 'echo "$SECURITY_AUDIT_RESULT"'));
+    expect(() => validateCiWorkflow(workflow)).toThrow("block unless every authoritative CI dependency succeeds");
   });
 
   it("rejects repository-mutating sensitivity jobs", () => {
