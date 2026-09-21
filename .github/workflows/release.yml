@@ -1,10 +1,16 @@
 name: Release
+run-name: Release · ${{ github.ref_name }} · sha=${{ github.sha }}
+
 on:
   push:
     tags: ['v*']
 
 permissions:
   contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release-validation:
@@ -42,6 +48,7 @@ jobs:
 
   security-audit:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
         with:
@@ -52,3 +59,24 @@ jobs:
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.0
       - run: pnpm install --frozen-lockfile
       - run: pnpm audit --audit-level=high
+
+  required-release:
+    name: required-release
+    if: always()
+    needs:
+      - release-validation
+      - security-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require all authoritative release jobs
+        env:
+          RELEASE_VALIDATION_RESULT: ${{ needs.release-validation.result }}
+          SECURITY_AUDIT_RESULT: ${{ needs.security-audit.result }}
+        run: |
+          set -euo pipefail
+          printf 'release-validation=%s\nsecurity-audit=%s\n' \
+            "$RELEASE_VALIDATION_RESULT" \
+            "$SECURITY_AUDIT_RESULT"
+          test "$RELEASE_VALIDATION_RESULT" = "success"
+          test "$SECURITY_AUDIT_RESULT" = "success"
