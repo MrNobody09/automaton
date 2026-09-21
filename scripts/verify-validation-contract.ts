@@ -4,7 +4,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
-import { inspectVitestTopology } from "./test-discovery.js";
+import {
+  discoverRepositoryTestFiles,
+  inspectVitestTopology,
+} from "./test-discovery.js";
 import {
   validateCiWorkflow,
   validatePackageScripts,
@@ -21,6 +24,25 @@ function read(relativePath: string): string {
 function fail(message: string): never {
   console.error(`[validation-contract] FAIL: ${message}`);
   process.exit(1);
+}
+
+function assertSameTestUniverse(repositoryFiles: string[], vitestFiles: string[]): void {
+  const repositorySet = new Set(repositoryFiles);
+  const vitestSet = new Set(vitestFiles);
+  const missingFromVitest = repositoryFiles.filter((file) => !vitestSet.has(file));
+  const unexpectedInVitest = vitestFiles.filter((file) => !repositorySet.has(file));
+
+  if (missingFromVitest.length > 0 || unexpectedInVitest.length > 0) {
+    const details = [
+      missingFromVitest.length > 0
+        ? `missing from Vitest: ${missingFromVitest.join(", ")}`
+        : null,
+      unexpectedInVitest.length > 0
+        ? `unexpected in Vitest: ${unexpectedInVitest.join(", ")}`
+        : null,
+    ].filter(Boolean).join("; ");
+    throw new Error(`Filesystem and Vitest test discovery differ (${details}).`);
+  }
 }
 
 try {
@@ -58,23 +80,32 @@ try {
     }
   }
 
+  // Add a temporary root-level probe so both discovery mechanisms also prove
+  // that tests outside today's src/__tests__ and test/ layouts remain covered.
   const probe = "validation-topology-probe.test.mjs";
   const probePath = path.join(repoRoot, probe);
   fs.writeFileSync(
     probePath,
     'import { test, expect } from "vitest"; test("probe", () => expect(true).toBe(true));\n',
   );
-  let discovered: string[];
+
+  let repositoryDiscovered: string[] = [];
+  let vitestDiscovered: string[] = [];
   try {
-    discovered = (await inspectVitestTopology(repoRoot)).files;
+    repositoryDiscovered = await discoverRepositoryTestFiles(repoRoot);
+    vitestDiscovered = (await inspectVitestTopology(repoRoot)).files;
+    if (!repositoryDiscovered.includes(probe)) {
+      throw new Error("Independent filesystem discovery did not find the root-level test probe.");
+    }
+    if (!vitestDiscovered.includes(probe)) {
+      throw new Error("Vitest did not discover the root-level test probe; its configuration is narrowed.");
+    }
+    assertSameTestUniverse(repositoryDiscovered, vitestDiscovered);
   } finally {
     fs.rmSync(probePath, { force: true });
   }
-  if (!discovered.includes(probe)) {
-    throw new Error("Vitest did not discover a root-level test probe; canonical discovery is narrowed.");
-  }
 
-  const realTests = discovered.filter((file) => file !== probe);
+  const realTests = repositoryDiscovered.filter((file) => file !== probe);
   validateShardPartition(realTests, 4);
 
   const forbiddenModifier = /\b(?:describe|suite|test|it)\s*\.\s*(?:skip|todo|only|skipIf|runIf)\s*\(/;
@@ -85,7 +116,7 @@ try {
   }
 
   console.log(
-    `[validation-contract] PASS: ${realTests.length} tests use canonical Vitest discovery; validation tooling is TypeScript-checked; four CI shards exactly partition discovery; workflow rules are parsed structurally and unit-tested; package scripts are unambiguous; no skipped/only/todo tests were found.`,
+    `[validation-contract] PASS: ${realTests.length} repository test files exactly match Vitest discovery; validation tooling is TypeScript-checked; four CI shards exactly partition discovery; workflow rules are parsed structurally and unit-tested; package scripts are unambiguous; no skipped/only/todo tests were found.`,
   );
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error));
