@@ -82,7 +82,7 @@ jobs:
       - name: Run isolated full-suite shard ${{ matrix.shard }}/4 on Node ${{ matrix.node-version }}
         env:
           TEST_FILE_TIMEOUT_MS: 120000
-        run: tsx scripts/run-isolated-tests.ts ${{ matrix.shard }} 4
+        run: pnpm exec tsx scripts/run-isolated-tests.ts ${{ matrix.shard }} 4
 
   security-audit:
     runs-on: ubuntu-latest

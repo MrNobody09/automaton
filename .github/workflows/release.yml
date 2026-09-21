@@ -38,7 +38,7 @@ jobs:
       - name: Run complete process-isolated test suite
         env:
           TEST_FILE_TIMEOUT_MS: 120000
-        run: tsx scripts/run-isolated-tests.ts
+        run: pnpm exec tsx scripts/run-isolated-tests.ts
 
   security-audit:
     runs-on: ubuntu-latest
