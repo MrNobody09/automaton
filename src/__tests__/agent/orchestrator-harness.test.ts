@@ -5,11 +5,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { OrchestratorHarness } from "../../agent/harnesses/orchestrator-harness.js";
 import type { HarnessContext, WorkerInferenceClient } from "../../agent/harness-types.js";
 import type { PlannerOutput } from "../../orchestration/planner.js";
-import type { TaskNode, TaskResult } from "../../orchestration/task-graph.js";
+import type { TaskNode } from "../../orchestration/task-graph.js";
 import { AgentWorkspace } from "../../orchestration/workspace.js";
-import { getTaskById, getTasksByGoal } from "../../state/database.js";
+import { getTasksByGoal } from "../../state/database.js";
 import { createInMemoryDb } from "../orchestration/test-db.js";
 import { createTestConfig, createTestIdentity, MockConwayClient } from "../mocks.js";
+
+type WorkerChatResult = Awaited<ReturnType<WorkerInferenceClient["chat"]>>;
 
 class PlannerAwareInference implements WorkerInferenceClient {
   private plannerIndex = 0;
@@ -17,24 +19,17 @@ class PlannerAwareInference implements WorkerInferenceClient {
 
   constructor(
     private readonly plannerOutputs: PlannerOutput[],
-    private readonly workerResponses: Array<{ content: string; toolCalls?: Array<{ id: string; type?: "function"; function: { name: string; arguments: string } }> }>,
+    private readonly workerResponses: WorkerChatResult[],
   ) {}
 
-  async chat(params: Parameters<WorkerInferenceClient["chat"]>[0]): Promise<{ content: string; toolCalls?: Array<{ id: string; function: { name: string; arguments: string } }> }> {
+  async chat(params: Parameters<WorkerInferenceClient["chat"]>[0]): ReturnType<WorkerInferenceClient["chat"]> {
     const systemPrompt = params.messages[0]?.content ?? "";
     if (systemPrompt.includes("# Planner Agent") || params.responseFormat?.type === "json_object") {
       const plan = this.plannerOutputs[this.plannerIndex++] ?? this.plannerOutputs[this.plannerOutputs.length - 1];
       return { content: JSON.stringify(plan) };
     }
 
-    const response = this.workerResponses[this.workerIndex++] ?? { content: "Done." };
-    return {
-      content: response.content,
-      toolCalls: response.toolCalls?.map((toolCall) => ({
-        id: toolCall.id,
-        function: toolCall.function,
-      })),
-    };
+    return this.workerResponses[this.workerIndex++] ?? { content: "Done." };
   }
 }
 

@@ -1,697 +1,545 @@
-/**
- * ERC-8004 On-Chain Agent Registration
- *
- * Registers the automaton on-chain as a Trustless Agent via ERC-8004.
- * Uses the Identity Registry on Base mainnet.
- *
- * Contract: 0x8004A169FB4a3325136EB29fA0ceB6D2e539a432 (Base)
- * Reputation: 0x8004BAa17C55a88189AE136b182e5fdA19dE9b63 (Base)
- *
- * Phase 3.2: Added preflight gas check, score validation, config-based network,
- * Transfer event topic fix, and transaction logging.
- */
-
 import {
   createPublicClient,
   createWalletClient,
   http,
   parseAbi,
-  keccak256,
-  toBytes,
-  encodeFunctionData,
+  parseAbiItem,
   type Address,
   type PrivateKeyAccount,
+  type PublicClient,
+  type WalletClient,
 } from "viem";
-import { base, baseSepolia } from "viem/chains";
-import type {
-  RegistryEntry,
-  DiscoveredAgent,
-  AutomatonDatabase,
-  OnchainTransactionRow,
-} from "../types.js";
-import { ulid } from "ulid";
+import type { AutomatonDatabase, OnchainTransactionRow } from "../types.js";
+import {
+  getOnchainTransactionByRequestId,
+  insertOnchainTransaction,
+  updateOnchainTransactionStatus,
+} from "../state/database.js";
 import { createLogger } from "../observability/logger.js";
-import type { ChainType } from "../identity/chain.js";
-const logger = createLogger("registry.erc8004");
+import { getErc8004Contracts, type Erc8004Network } from "./erc8004-config.js";
+import { scanLatestMintEvents } from "./erc8004-event-scan.js";
 
-/**
- * Guard: throws if the automaton is using a Solana wallet.
- * ERC-8004 is an EVM standard and requires an EVM wallet.
- */
-export function requireEvmChain(chainType?: ChainType): void {
-  if (chainType === "solana") {
-    throw new Error(
-      "ERC-8004 requires an EVM wallet. Solana automatons cannot register on-chain via ERC-8004. " +
-      "Your identity is registered via Conway API instead.",
-    );
-  }
-}
+const logger = createLogger("erc8004");
 
-// ─── Contract Addresses ──────────────────────────────────────
-
-const CONTRACTS = {
-  mainnet: {
-    identity: "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432" as Address,
-    reputation: "0x8004BAa17C55a88189AE136b182e5fdA19dE9b63" as Address,
-    chain: base,
-  },
-  testnet: {
-    identity: "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432" as Address,
-    reputation: "0x8004BAa17C55a88189AE136b182e5fdA19dE9b63" as Address,
-    chain: baseSepolia,
-  },
-} as const;
-
-// ─── ABI (minimal subset needed for registration) ────────────
-
-// ERC-8004 Identity Registry ABI
-// 正确的函数签名 (通过字节码分析确认):
-// - 读取: tokenURI(uint256) - 标准 ERC-721
-// - 更新: setAgentURI(uint256,string) - ERC-8004 自定义
 const IDENTITY_ABI = parseAbi([
-  "function register(string agentURI) external returns (uint256 agentId)",
-  "function setAgentURI(uint256 agentId, string newAgentURI) external",
+  "function register(string agentURI) external returns (uint256)",
+  "function register(string agentURI, tuple(string key, bytes value)[] metadata) external returns (uint256)",
   "function tokenURI(uint256 tokenId) external view returns (string)",
   "function ownerOf(uint256 tokenId) external view returns (address)",
+  "function getAgentWallet(uint256 tokenId) external view returns (address)",
+  "function setAgentWallet(uint256 tokenId, address newWallet, uint256 deadline, bytes signature) external",
+  "function setAgentURI(uint256 tokenId, string newURI) external",
   "function totalSupply() external view returns (uint256)",
-  "function balanceOf(address owner) external view returns (uint256)",
+  "event Registered(uint256 indexed agentId, string agentURI, address indexed owner)",
 ]);
 
 const REPUTATION_ABI = parseAbi([
-  "function leaveFeedback(uint256 agentId, uint8 score, string comment) external",
-  "function getFeedback(uint256 agentId) external view returns ((address, uint8, string, uint256)[])",
+  "function giveFeedback(uint256 agentId, int128 value, uint8 valueDecimals, string tag1, string tag2, string endpoint, string feedbackURI, bytes32 feedbackHash) external",
+  "function getSummary(uint256 agentId, address[] clientAddresses, string tag1, string tag2) external view returns (uint64 count, int128 summaryValue, uint8 summaryValueDecimals)",
 ]);
 
-// Phase 3.2: ERC-721 Transfer event topic signature for agent ID extraction
-const TRANSFER_EVENT_TOPIC = keccak256(
-  toBytes("Transfer(address,address,uint256)"),
+const TRANSFER_EVENT = parseAbiItem(
+  "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
 );
 
-type Network = "mainnet" | "testnet";
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
 
-/**
- * Resolve the RPC transport URL.
- * Priority: explicit parameter > AUTOMATON_RPC_URL env var > viem default (public RPC).
- */
-function resolveRpcUrl(rpcUrl?: string): string | undefined {
-  return rpcUrl || process.env.AUTOMATON_RPC_URL || undefined;
+type Network = Erc8004Network;
+
+function buildPublicClient(network: Network, rpcUrl?: string): PublicClient {
+  const contracts = getErc8004Contracts(network);
+  return createPublicClient({
+    chain: contracts.chain,
+    transport: http(rpcUrl),
+  });
 }
 
-// ─── Preflight Check ────────────────────────────────────────────
-
-/**
- * Phase 3.2: Gas estimation + balance check before on-chain transaction.
- * Throws descriptive error if insufficient balance.
- */
-async function preflight(
+function buildWalletClient(
   account: PrivateKeyAccount,
   network: Network,
-  functionData: {
-    address: Address;
-    abi: any;
-    functionName: string;
-    args: any[];
-  },
   rpcUrl?: string,
+): WalletClient {
+  const contracts = getErc8004Contracts(network);
+  return createWalletClient({
+    account,
+    chain: contracts.chain,
+    transport: http(rpcUrl),
+  });
+}
+
+function normalizeHash(hash: unknown): string {
+  return typeof hash === "string" ? hash : String(hash);
+}
+
+function extractTokenIdFromReceipt(receipt: any): string | null {
+  for (const log of receipt?.logs ?? []) {
+    if (!Array.isArray(log?.topics) || log.topics.length < 4) continue;
+    const [topic0, fromTopic, , tokenTopic] = log.topics;
+    if (typeof topic0 !== "string" || typeof fromTopic !== "string" || typeof tokenTopic !== "string") continue;
+    const transferSelector = "0xddf252ad";
+    if (!topic0.toLowerCase().startsWith(transferSelector)) continue;
+    if (!fromTopic.toLowerCase().endsWith("0000000000000000000000000000000000000000")) continue;
+    try {
+      return BigInt(tokenTopic).toString();
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+async function recordOnchainRequest(
+  db: AutomatonDatabase | undefined,
+  row: OnchainTransactionRow,
 ): Promise<void> {
-  const contracts = CONTRACTS[network];
-  const chain = contracts.chain;
-
-  const publicClient = createPublicClient({
-    chain,
-    transport: http(resolveRpcUrl(rpcUrl)),
-  });
-
-  // Encode calldata for accurate gas estimation
-  const data = encodeFunctionData({
-    abi: functionData.abi,
-    functionName: functionData.functionName,
-    args: functionData.args,
-  });
-
-  // Estimate gas
-  const gasEstimate = await publicClient
-    .estimateGas({
-      account: account.address,
-      to: functionData.address,
-      data,
-    })
-    .catch(() => BigInt(200_000)); // Fallback estimate
-
-  // Get gas price
-  const gasPrice = await publicClient
-    .getGasPrice()
-    .catch(() => BigInt(1_000_000_000)); // 1 gwei fallback
-
-  // Get balance
-  const balance = await publicClient.getBalance({
-    address: account.address,
-  });
-
-  const estimatedCost = gasEstimate * gasPrice;
-
-  if (balance < estimatedCost) {
-    throw new Error(
-      `Insufficient ETH for gas. Balance: ${balance} wei, estimated cost: ${estimatedCost} wei (gas: ${gasEstimate}, price: ${gasPrice} wei)`,
-    );
-  }
+  if (!db) return;
+  insertOnchainTransaction(db.raw, row);
 }
 
-// ─── Transaction Logging ────────────────────────────────────────
-
-/**
- * Phase 3.2: Log a transaction to the onchain_transactions table.
- */
-function logTransaction(
-  rawDb: import("better-sqlite3").Database | undefined,
-  txHash: string,
-  chain: string,
-  operation: string,
-  status: "pending" | "confirmed" | "failed",
-  gasUsed?: number,
-  metadata?: Record<string, unknown>,
+function markOnchainRequest(
+  db: AutomatonDatabase | undefined,
+  requestId: string,
+  status: "submitted" | "confirmed" | "failed",
+  txHash?: string | null,
+  error?: string | null,
 ): void {
-  if (!rawDb) return;
-  try {
-    rawDb
-      .prepare(
-        `INSERT INTO onchain_transactions (id, tx_hash, chain, operation, status, gas_used, metadata)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        ulid(),
-        txHash,
-        chain,
-        operation,
-        status,
-        gasUsed ?? null,
-        JSON.stringify(metadata ?? {}),
-      );
-  } catch (error) {
-    logger.error(
-      "Transaction log failed:",
-      error instanceof Error ? error : undefined,
-    );
-  }
+  if (!db) return;
+  updateOnchainTransactionStatus(db.raw, requestId, status, txHash, error);
 }
 
-function updateTransactionStatus(
-  rawDb: import("better-sqlite3").Database | undefined,
-  txHash: string,
-  status: "pending" | "confirmed" | "failed",
-  gasUsed?: number,
-): void {
-  if (!rawDb) return;
-  try {
-    rawDb
-      .prepare(
-        "UPDATE onchain_transactions SET status = ?, gas_used = COALESCE(?, gas_used) WHERE tx_hash = ?",
-      )
-      .run(status, gasUsed ?? null, txHash);
-  } catch (error) {
-    logger.error(
-      "Transaction status update failed:",
-      error instanceof Error ? error : undefined,
-    );
+function existingConfirmedHash(db: AutomatonDatabase | undefined, requestId: string): string | null {
+  if (!db) return null;
+  const existing = getOnchainTransactionByRequestId(db.raw, requestId);
+  if (!existing) return null;
+  if (existing.status === "confirmed" && existing.txHash) return existing.txHash;
+  if (existing.status === "submitted") {
+    throw new Error(`On-chain request ${requestId} is already submitted and awaiting confirmation.`);
   }
+  if (existing.status === "failed") {
+    throw new Error(`On-chain request ${requestId} previously failed and must use a new request id.`);
+  }
+  return null;
 }
 
-// ─── Registration ───────────────────────────────────────────────
+export interface RegisteredAgent {
+  tokenId: string;
+  owner: string;
+}
 
-/**
- * Register the automaton on-chain with ERC-8004.
- * Returns the agent ID (NFT token ID).
- *
- * Phase 3.2: Preflight check + transaction logging.
- */
+export interface AgentRegistrationResult {
+  txHash: string;
+  tokenId: string | null;
+}
+
+export interface ReputationSummary {
+  count: number;
+  summaryValue: bigint;
+  decimals: number;
+}
+
 export async function registerAgent(
   account: PrivateKeyAccount,
   agentURI: string,
-  network: Network = "mainnet",
-  db: AutomatonDatabase,
-  rpcUrl?: string,
-): Promise<RegistryEntry> {
-  const contracts = CONTRACTS[network];
-  const chain = contracts.chain;
-  const rpc = resolveRpcUrl(rpcUrl);
+  options: {
+    network?: Network;
+    rpcUrl?: string;
+    requestId?: string;
+    db?: AutomatonDatabase;
+  } = {},
+): Promise<AgentRegistrationResult> {
+  const network = options.network ?? "mainnet";
+  const requestId = options.requestId ?? `register-agent:${account.address}:${agentURI}`;
+  const priorHash = existingConfirmedHash(options.db, requestId);
+  if (priorHash) return { txHash: priorHash, tokenId: null };
 
-  // Phase 3.2: Preflight gas check
-  await preflight(account, network, {
-    address: contracts.identity,
-    abi: IDENTITY_ABI,
-    functionName: "register",
-    args: [agentURI],
-  }, rpcUrl);
+  const contracts = getErc8004Contracts(network);
+  const publicClient = buildPublicClient(network, options.rpcUrl);
+  const walletClient = buildWalletClient(account, network, options.rpcUrl);
 
-  const publicClient = createPublicClient({
-    chain,
-    transport: http(rpc),
+  await recordOnchainRequest(options.db, {
+    requestId,
+    operation: "erc8004.register_agent",
+    network,
+    status: "prepared",
+    txHash: null,
+    error: null,
+    metadataJson: JSON.stringify({ agentURI }),
   });
 
-  const walletClient = createWalletClient({
-    account,
-    chain,
-    transport: http(rpc),
-  });
+  try {
+    const hash = await walletClient.writeContract({
+      account,
+      chain: contracts.chain,
+      address: contracts.identity,
+      abi: IDENTITY_ABI,
+      functionName: "register",
+      args: [agentURI],
+    });
+    const txHash = normalizeHash(hash);
+    markOnchainRequest(options.db, requestId, "submitted", txHash);
 
-  // Call register(agentURI)
-  const hash = await walletClient.writeContract({
-    address: contracts.identity,
-    abi: IDENTITY_ABI,
-    functionName: "register",
-    args: [agentURI],
-  });
-
-  // Phase 3.2: Log pending transaction
-  logTransaction(
-    db.raw,
-    hash,
-    `eip155:${chain.id}`,
-    "register",
-    "pending",
-    undefined,
-    { agentURI },
-  );
-
-  // Wait for transaction receipt
-  const receipt = await publicClient.waitForTransactionReceipt({ hash });
-
-  // Phase 3.2: Update transaction status
-  const gasUsed = receipt.gasUsed ? Number(receipt.gasUsed) : undefined;
-  updateTransactionStatus(
-    db.raw,
-    hash,
-    receipt.status === "success" ? "confirmed" : "failed",
-    gasUsed,
-  );
-
-  // Phase 3.2: Extract agentId using Transfer event topic signature
-  let agentId = "0";
-  for (const log of receipt.logs) {
-    if (log.topics.length >= 4 && log.topics[0] === TRANSFER_EVENT_TOPIC) {
-      // Transfer(address from, address to, uint256 tokenId)
-      agentId = BigInt(log.topics[3]!).toString();
-      break;
+    const receipt = await publicClient.waitForTransactionReceipt({ hash: hash as `0x${string}` });
+    if (receipt.status !== "success") {
+      throw new Error(`Registration transaction ${txHash} reverted.`);
     }
-  }
 
-  const entry: RegistryEntry = {
-    agentId,
-    agentURI,
-    chain: `eip155:${chain.id}`,
-    contractAddress: contracts.identity,
-    txHash: hash,
-    registeredAt: new Date().toISOString(),
+    const tokenId = extractTokenIdFromReceipt(receipt);
+    markOnchainRequest(options.db, requestId, "confirmed", txHash);
+    return { txHash, tokenId };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    markOnchainRequest(options.db, requestId, "failed", null, message);
+    throw error;
+  }
+}
+
+export async function setAgentURI(
+  account: PrivateKeyAccount,
+  tokenId: string,
+  agentURI: string,
+  options: {
+    network?: Network;
+    rpcUrl?: string;
+    requestId?: string;
+    db?: AutomatonDatabase;
+  } = {},
+): Promise<string> {
+  const network = options.network ?? "mainnet";
+  const requestId = options.requestId ?? `set-agent-uri:${tokenId}:${agentURI}`;
+  const priorHash = existingConfirmedHash(options.db, requestId);
+  if (priorHash) return priorHash;
+
+  const contracts = getErc8004Contracts(network);
+  const publicClient = buildPublicClient(network, options.rpcUrl);
+  const walletClient = buildWalletClient(account, network, options.rpcUrl);
+
+  await recordOnchainRequest(options.db, {
+    requestId,
+    operation: "erc8004.set_agent_uri",
+    network,
+    status: "prepared",
+    txHash: null,
+    error: null,
+    metadataJson: JSON.stringify({ tokenId, agentURI }),
+  });
+
+  try {
+    const hash = await walletClient.writeContract({
+      account,
+      chain: contracts.chain,
+      address: contracts.identity,
+      abi: IDENTITY_ABI,
+      functionName: "setAgentURI",
+      args: [BigInt(tokenId), agentURI],
+    });
+    const txHash = normalizeHash(hash);
+    markOnchainRequest(options.db, requestId, "submitted", txHash);
+    const receipt = await publicClient.waitForTransactionReceipt({ hash: hash as `0x${string}` });
+    if (receipt.status !== "success") throw new Error(`setAgentURI transaction ${txHash} reverted.`);
+    markOnchainRequest(options.db, requestId, "confirmed", txHash);
+    return txHash;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    markOnchainRequest(options.db, requestId, "failed", null, message);
+    throw error;
+  }
+}
+
+export async function setAgentWallet(
+  account: PrivateKeyAccount,
+  tokenId: string,
+  newWallet: Address,
+  deadline: bigint,
+  signature: `0x${string}`,
+  options: {
+    network?: Network;
+    rpcUrl?: string;
+    requestId?: string;
+    db?: AutomatonDatabase;
+  } = {},
+): Promise<string> {
+  const network = options.network ?? "mainnet";
+  const requestId = options.requestId ?? `set-agent-wallet:${tokenId}:${newWallet}:${deadline.toString()}`;
+  const priorHash = existingConfirmedHash(options.db, requestId);
+  if (priorHash) return priorHash;
+
+  const contracts = getErc8004Contracts(network);
+  const publicClient = buildPublicClient(network, options.rpcUrl);
+  const walletClient = buildWalletClient(account, network, options.rpcUrl);
+
+  await recordOnchainRequest(options.db, {
+    requestId,
+    operation: "erc8004.set_agent_wallet",
+    network,
+    status: "prepared",
+    txHash: null,
+    error: null,
+    metadataJson: JSON.stringify({ tokenId, newWallet, deadline: deadline.toString() }),
+  });
+
+  try {
+    const hash = await walletClient.writeContract({
+      account,
+      chain: contracts.chain,
+      address: contracts.identity,
+      abi: IDENTITY_ABI,
+      functionName: "setAgentWallet",
+      args: [BigInt(tokenId), newWallet, deadline, signature],
+    });
+    const txHash = normalizeHash(hash);
+    markOnchainRequest(options.db, requestId, "submitted", txHash);
+    const receipt = await publicClient.waitForTransactionReceipt({ hash: hash as `0x${string}` });
+    if (receipt.status !== "success") throw new Error(`setAgentWallet transaction ${txHash} reverted.`);
+    markOnchainRequest(options.db, requestId, "confirmed", txHash);
+    return txHash;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    markOnchainRequest(options.db, requestId, "failed", null, message);
+    throw error;
+  }
+}
+
+export async function giveFeedback(
+  account: PrivateKeyAccount,
+  agentId: string,
+  params: {
+    value: bigint;
+    valueDecimals?: number;
+    tag1?: string;
+    tag2?: string;
+    endpoint?: string;
+    feedbackURI?: string;
+    feedbackHash?: `0x${string}`;
+  },
+  options: {
+    network?: Network;
+    rpcUrl?: string;
+    requestId?: string;
+    db?: AutomatonDatabase;
+  } = {},
+): Promise<string> {
+  const network = options.network ?? "mainnet";
+  const requestId = options.requestId ?? `feedback:${account.address}:${agentId}:${params.value.toString()}:${params.tag1 ?? ""}:${params.tag2 ?? ""}`;
+  const priorHash = existingConfirmedHash(options.db, requestId);
+  if (priorHash) return priorHash;
+
+  const contracts = getErc8004Contracts(network);
+  const publicClient = buildPublicClient(network, options.rpcUrl);
+  const walletClient = buildWalletClient(account, network, options.rpcUrl);
+  const feedbackHash = params.feedbackHash ?? `0x${"00".repeat(32)}`;
+
+  await recordOnchainRequest(options.db, {
+    requestId,
+    operation: "erc8004.give_feedback",
+    network,
+    status: "prepared",
+    txHash: null,
+    error: null,
+    metadataJson: JSON.stringify({
+      agentId,
+      value: params.value.toString(),
+      valueDecimals: params.valueDecimals ?? 0,
+      tag1: params.tag1 ?? "",
+      tag2: params.tag2 ?? "",
+      endpoint: params.endpoint ?? "",
+      feedbackURI: params.feedbackURI ?? "",
+      feedbackHash,
+    }),
+  });
+
+  try {
+    const hash = await walletClient.writeContract({
+      account,
+      chain: contracts.chain,
+      address: contracts.reputation,
+      abi: REPUTATION_ABI,
+      functionName: "giveFeedback",
+      args: [
+        BigInt(agentId),
+        params.value,
+        params.valueDecimals ?? 0,
+        params.tag1 ?? "",
+        params.tag2 ?? "",
+        params.endpoint ?? "",
+        params.feedbackURI ?? "",
+        feedbackHash,
+      ],
+    });
+    const txHash = normalizeHash(hash);
+    markOnchainRequest(options.db, requestId, "submitted", txHash);
+    const receipt = await publicClient.waitForTransactionReceipt({ hash: hash as `0x${string}` });
+    if (receipt.status !== "success") throw new Error(`Feedback transaction ${txHash} reverted.`);
+    markOnchainRequest(options.db, requestId, "confirmed", txHash);
+    return txHash;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    markOnchainRequest(options.db, requestId, "failed", null, message);
+    throw error;
+  }
+}
+
+export async function getReputationSummary(
+  agentId: string,
+  options: {
+    network?: Network;
+    rpcUrl?: string;
+    clientAddresses?: Address[];
+    tag1?: string;
+    tag2?: string;
+  } = {},
+): Promise<ReputationSummary> {
+  const network = options.network ?? "mainnet";
+  const contracts = getErc8004Contracts(network);
+  const publicClient = buildPublicClient(network, options.rpcUrl);
+  const result = await publicClient.readContract({
+    address: contracts.reputation,
+    abi: REPUTATION_ABI,
+    functionName: "getSummary",
+    args: [
+      BigInt(agentId),
+      options.clientAddresses ?? [],
+      options.tag1 ?? "",
+      options.tag2 ?? "",
+    ],
+  });
+  const [count, summaryValue, summaryValueDecimals] = result as readonly [bigint, bigint, number];
+  return {
+    count: Number(count),
+    summaryValue,
+    decimals: Number(summaryValueDecimals),
   };
-
-  db.setRegistryEntry(entry);
-  return entry;
 }
 
-/**
- * Update the agent's URI on-chain.
- */
-export async function updateAgentURI(
-  account: PrivateKeyAccount,
-  agentId: string,
-  newAgentURI: string,
-  network: Network = "mainnet",
-  db: AutomatonDatabase,
-  rpcUrl?: string,
-): Promise<string> {
-  const contracts = CONTRACTS[network];
-  const chain = contracts.chain;
-
-  // Phase 3.2: Preflight gas check
-  await preflight(account, network, {
-    address: contracts.identity,
-    abi: IDENTITY_ABI,
-    functionName: "setAgentURI",
-    args: [BigInt(agentId), newAgentURI],
-  }, rpcUrl);
-
-  const walletClient = createWalletClient({
-    account,
-    chain,
-    transport: http(resolveRpcUrl(rpcUrl)),
-  });
-
-  const hash = await walletClient.writeContract({
-    address: contracts.identity,
-    abi: IDENTITY_ABI,
-    functionName: "setAgentURI",
-    args: [BigInt(agentId), newAgentURI],
-  });
-
-  // Phase 3.2: Log transaction
-  logTransaction(
-    db.raw,
-    hash,
-    `eip155:${chain.id}`,
-    "updateAgentURI",
-    "pending",
-    undefined,
-    { agentId, newAgentURI },
-  );
-
-  // Update in DB
-  const entry = db.getRegistryEntry();
-  if (entry) {
-    entry.agentURI = newAgentURI;
-    entry.txHash = hash;
-    db.setRegistryEntry(entry);
-  }
-
-  return hash;
-}
-
-/**
- * Leave reputation feedback for another agent.
- *
- * Phase 3.2: Validates score 1-5, comment max 500 chars,
- * uses config-based network (not hardcoded "mainnet").
- */
-export async function leaveFeedback(
-  account: PrivateKeyAccount,
-  agentId: string,
-  score: number,
-  comment: string,
-  network: Network = "mainnet",
-  db: AutomatonDatabase,
-  rpcUrl?: string,
-): Promise<string> {
-  // Phase 3.2: Validate score range 1-5
-  if (!Number.isInteger(score) || score < 1 || score > 5) {
-    throw new Error(
-      `Invalid score: ${score}. Must be an integer between 1 and 5.`,
-    );
-  }
-
-  // Phase 3.2: Validate comment length
-  if (comment.length > 500) {
-    throw new Error(`Comment too long: ${comment.length} chars (max 500).`);
-  }
-
-  const contracts = CONTRACTS[network];
-  const chain = contracts.chain;
-
-  // Phase 3.2: Preflight gas check
-  await preflight(account, network, {
-    address: contracts.reputation,
-    abi: REPUTATION_ABI,
-    functionName: "leaveFeedback",
-    args: [BigInt(agentId), score, comment],
-  }, rpcUrl);
-
-  const walletClient = createWalletClient({
-    account,
-    chain,
-    transport: http(resolveRpcUrl(rpcUrl)),
-  });
-
-  const hash = await walletClient.writeContract({
-    address: contracts.reputation,
-    abi: REPUTATION_ABI,
-    functionName: "leaveFeedback",
-    args: [BigInt(agentId), score, comment],
-  });
-
-  // Phase 3.2: Log transaction
-  logTransaction(
-    db.raw,
-    hash,
-    `eip155:${chain.id}`,
-    "leaveFeedback",
-    "pending",
-    undefined,
-    { agentId, score, comment },
-  );
-
-  return hash;
-}
-
-/**
- * Query the registry for an agent by ID.
- */
 export async function queryAgent(
   agentId: string,
   network: Network = "mainnet",
   rpcUrl?: string,
-): Promise<DiscoveredAgent | null> {
-  const contracts = CONTRACTS[network];
-  const chain = contracts.chain;
-
-  const publicClient = createPublicClient({
-    chain,
-    transport: http(resolveRpcUrl(rpcUrl)),
-  });
+): Promise<{ agentId: string; owner: string; agentURI: string } | null> {
+  const contracts = getErc8004Contracts(network);
+  const publicClient = buildPublicClient(network, rpcUrl);
 
   try {
-    const uri = await publicClient.readContract({
+    const agentURI = await publicClient.readContract({
       address: contracts.identity,
       abi: IDENTITY_ABI,
       functionName: "tokenURI",
       args: [BigInt(agentId)],
-    });
+    }) as string;
 
-    // ownerOf may revert on contracts that don't implement it
     let owner = "";
     try {
-      owner = (await publicClient.readContract({
+      owner = await publicClient.readContract({
         address: contracts.identity,
         abi: IDENTITY_ABI,
         functionName: "ownerOf",
         args: [BigInt(agentId)],
-      })) as string;
+      }) as string;
     } catch {
-      logger.warn(`ownerOf reverted for agent ${agentId}, continuing without owner`);
+      // ownerOf can fail for burned/nonstandard tokens while tokenURI remains useful.
     }
 
-    return {
-      agentId,
-      owner,
-      agentURI: uri as string,
-    };
+    return { agentId, owner, agentURI };
   } catch {
     return null;
   }
 }
 
 /**
- * Get the total number of registered agents.
- * Tries totalSupply() first; if that reverts (proxy contracts without
- * ERC-721 Enumerable), falls back to a binary search on ownerOf().
+ * Return totalSupply when the registry exposes it. Some deployed registries do
+ * not support enumerable supply; in that case return 0 so callers use the
+ * complete Transfer-event fallback. We intentionally do not guess supply via
+ * ownerOf binary search because transport failures are indistinguishable from
+ * token absence and can silently undercount.
  */
 export async function getTotalAgents(
   network: Network = "mainnet",
   rpcUrl?: string,
 ): Promise<number> {
-  const contracts = CONTRACTS[network];
-  const chain = contracts.chain;
-
-  const publicClient = createPublicClient({
-    chain,
-    transport: http(resolveRpcUrl(rpcUrl)),
-  });
+  const contracts = getErc8004Contracts(network);
+  const publicClient = buildPublicClient(network, rpcUrl);
 
   try {
-    const supply = await publicClient.readContract({
+    const total = await publicClient.readContract({
       address: contracts.identity,
       abi: IDENTITY_ABI,
       functionName: "totalSupply",
     });
-    return Number(supply);
-  } catch {
-    // totalSupply() reverted — proxy may lack ERC-721 Enumerable.
-    // Binary search for the highest minted tokenId via ownerOf().
-    return estimateTotalByBinarySearch(publicClient, contracts.identity);
+    const value = Number(total);
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new Error(`Invalid ERC-8004 totalSupply value: ${String(total)}`);
+    }
+    return value;
+  } catch (error) {
+    logger.debug("ERC-8004 totalSupply unavailable; using event fallback", {
+      network,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return 0;
   }
 }
 
 /**
- * Estimate total minted tokens by binary-searching ownerOf().
- * Token IDs are sequential starting from 1, so the highest existing
- * tokenId equals the total minted count.
- */
-async function estimateTotalByBinarySearch(
-  client: { readContract: (args: any) => Promise<any> },
-  contractAddress: Address,
-): Promise<number> {
-  const exists = async (id: number): Promise<boolean> => {
-    try {
-      await client.readContract({
-        address: contractAddress,
-        abi: IDENTITY_ABI,
-        functionName: "ownerOf",
-        args: [BigInt(id)],
-      });
-      return true;
-    } catch {
-      return false;
-    }
-  };
-
-  // Quick probe to find an upper bound
-  // Quick probe to find an upper bound
-  let upper = 1;
-  while (await exists(upper)) {
-    upper *= 2;
-    if (upper > 10_000_000) break; // safety cap
-  }
-
-  // Binary search between 0 and upper
-  let lo = 0;
-  let hi = upper;
-  while (lo < hi) {
-    const mid = Math.floor((lo + hi + 1) / 2);
-    if (await exists(mid)) {
-      lo = mid;
-    } else {
-      hi = mid - 1;
-    }
-  }
-
-  if (lo > 0) {
-    logger.info(`Binary search estimated total agents: ${lo}`);
-  }
-  return lo;
-}
-
-/**
- * Discover registered agents by scanning Transfer mint events.
- * Fallback for contracts that don't implement totalSupply (ERC-721 Enumerable).
+ * Discover the newest registered agent IDs from ERC-721 mint events.
  *
- * Scans for Transfer(address(0), to, tokenId) events to find minted tokens.
- * Returns token IDs and owners extracted directly from event data.
+ * This scan is fail-closed for completeness: it stops only after it has found
+ * enough newest unique mints or reached the verified deployment block. RPC
+ * chunks are retried; a persistent chunk failure rejects instead of returning
+ * a partial list that looks complete.
  */
 export async function getRegisteredAgentsByEvents(
   network: Network = "mainnet",
-  limit: number = 20,
+  limit = 20,
   rpcUrl?: string,
-): Promise<{ tokenId: string; owner: string }[]> {
-  const contracts = CONTRACTS[network];
-  const chain = contracts.chain;
+): Promise<RegisteredAgent[]> {
+  const contracts = getErc8004Contracts(network);
+  const publicClient = buildPublicClient(network, rpcUrl);
+  const currentBlock = await publicClient.getBlockNumber();
 
-  const publicClient = createPublicClient({
-    chain,
-    transport: http(resolveRpcUrl(rpcUrl)),
+  const events = await scanLatestMintEvents({
+    currentBlock,
+    deploymentBlock: contracts.deploymentBlock,
+    limit,
+    maxBlockDifference: 1_999n,
+    getChunk: async (fromBlock, toBlock) => {
+      const logs = await publicClient.getLogs({
+        address: contracts.identity,
+        event: TRANSFER_EVENT,
+        args: { from: ZERO_ADDRESS },
+        fromBlock,
+        toBlock,
+      });
+
+      return logs.map((log: any) => {
+        const tokenId = log?.args?.tokenId;
+        const owner = log?.args?.to;
+        if (typeof tokenId !== "bigint" || typeof owner !== "string" || owner.length === 0) {
+          throw new Error(`Malformed ERC-8004 mint event in blocks ${fromBlock}-${toBlock}.`);
+        }
+        return { tokenId, owner };
+      });
+    },
   });
 
-  try {
-    const currentBlock = await publicClient.getBlockNumber();
-    // Scan last 500,000 blocks (~11.5 days on Base at 2s blocks)
-    const earliestBlock = currentBlock > 500_000n ? currentBlock - 500_000n : 0n;
-
-    // Paginate backward in ≤10K-block chunks (newest-first).
-    // Base public RPC enforces a 10,000-block limit on eth_getLogs.
-    const MAX_BLOCK_RANGE = 10_000n;
-    const MAX_CONSECUTIVE_FAILURES = 5;
-    const PER_CHUNK_TIMEOUT_MS = 8_000;
-    const allLogs: { args: { tokenId?: bigint; to?: string; from?: string } }[] = [];
-    let scanTo = currentBlock;
-    let consecutiveFailures = 0;
-
-    while (scanTo > earliestBlock) {
-      const scanFrom = scanTo - MAX_BLOCK_RANGE > earliestBlock
-        ? scanTo - MAX_BLOCK_RANGE
-        : earliestBlock;
-
-      try {
-        const chunkLogs = await Promise.race([
-          publicClient.getLogs({
-            address: contracts.identity,
-            event: {
-              type: "event",
-              name: "Transfer",
-              inputs: [
-                { type: "address", name: "from", indexed: true },
-                { type: "address", name: "to", indexed: true },
-                { type: "uint256", name: "tokenId", indexed: true },
-              ],
-            },
-            args: {
-              from: "0x0000000000000000000000000000000000000000" as Address,
-            },
-            fromBlock: scanFrom,
-            toBlock: scanTo,
-          }),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error("chunk timeout")), PER_CHUNK_TIMEOUT_MS),
-          ),
-        ]);
-        allLogs.push(...chunkLogs);
-        consecutiveFailures = 0;
-      } catch (chunkError) {
-        consecutiveFailures++;
-        logger.warn(`Event scan chunk ${scanFrom}-${scanTo} failed (${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}): ${chunkError instanceof Error ? chunkError.message : "unknown error"}`);
-        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-          logger.warn("Too many consecutive chunk failures, stopping scan");
-          break;
-        }
-      }
-
-      // Early exit if we already have enough logs
-      if (allLogs.length >= limit) break;
-
-      scanTo = scanFrom - 1n; // -1n prevents overlap between chunks
-    }
-
-    // Deduplicate by tokenId (defensive against RPC edge cases)
-    const seen = new Set<string>();
-    const uniqueLogs = allLogs.filter((log) => {
-      const id = log.args.tokenId!.toString();
-      if (seen.has(id)) return false;
-      seen.add(id);
-      return true;
-    });
-
-    // Extract token IDs and owners, sorted by tokenId descending (most recent first).
-    // tokenIds are monotonically increasing on mint, so this gives correct
-    // newest-first ordering regardless of chunk collection order.
-    const agents = uniqueLogs
-      .map((log) => ({
-        tokenId: (log.args.tokenId!).toString(),
-        owner: log.args.to as string,
-      }))
-      .sort((a, b) => {
-        const diff = BigInt(b.tokenId) - BigInt(a.tokenId);
-        return diff > 0n ? 1 : diff < 0n ? -1 : 0;
-      })
-      .slice(0, limit);
-    
-    logger.info(`Event scan found ${agents.length} minted agents (scanned ${allLogs.length} Transfer events across ${Math.ceil(Number(currentBlock - earliestBlock) / Number(MAX_BLOCK_RANGE))} chunks)`);
-    return agents;
-  } catch (error) {
-    logger.warn(`Transfer event scan failed, returning empty results: ${error instanceof Error ? error.message : "unknown error"}`);
-    return [];
-  }
+  return events.map((event) => ({
+    tokenId: event.tokenId.toString(),
+    owner: event.owner,
+  }));
 }
 
-/**
- * Check if an address has a registered agent.
- */
+/** Check whether an address owns at least one ERC-8004 agent token. */
 export async function hasRegisteredAgent(
   address: Address,
   network: Network = "mainnet",
   rpcUrl?: string,
 ): Promise<boolean> {
-  const contracts = CONTRACTS[network];
-  const chain = contracts.chain;
-
-  const publicClient = createPublicClient({
-    chain,
-    transport: http(resolveRpcUrl(rpcUrl)),
+  const contracts = getErc8004Contracts(network);
+  const publicClient = buildPublicClient(network, rpcUrl);
+  const balanceOfAbi = parseAbi(["function balanceOf(address owner) external view returns (uint256)"]);
+  const balance = await publicClient.readContract({
+    address: contracts.identity,
+    abi: balanceOfAbi,
+    functionName: "balanceOf",
+    args: [address],
   });
-
-  try {
-    const balance = await publicClient.readContract({
-      address: contracts.identity,
-      abi: IDENTITY_ABI,
-      functionName: "balanceOf",
-      args: [address],
-    });
-    return Number(balance) > 0;
-  } catch {
-    return false;
-  }
+  return BigInt(balance as bigint) > 0n;
 }

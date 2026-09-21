@@ -11,7 +11,6 @@ import type Database from "better-sqlite3";
 import type {
   PolicyRule,
   PolicyRequest,
-  PolicyRuleResult,
   PolicyDecision,
   PolicyAction,
   AuthorityLevel,
@@ -19,6 +18,25 @@ import type {
 } from "../types.js";
 import { insertPolicyDecision } from "../state/database.js";
 import type { PolicyDecisionRow } from "../state/database.js";
+
+const UNSERIALIZABLE_ARGS_SENTINEL = "[unserializable-policy-args]";
+
+function hashText(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function serializePolicyArgs(args: unknown): { serialized: string; valid: boolean } {
+  try {
+    const serialized = JSON.stringify(args);
+    // JSON.stringify(undefined) returns undefined rather than a JSON document.
+    if (serialized === undefined) return { serialized: UNSERIALIZABLE_ARGS_SENTINEL, valid: false };
+    return { serialized, valid: true };
+  } catch {
+    // Cycles, BigInt values, or other non-JSON input are invalid tool-call
+    // arguments. Keep a stable audit hash while denying the action safely.
+    return { serialized: UNSERIALIZABLE_ARGS_SENTINEL, valid: false };
+  }
+}
 
 export class PolicyEngine {
   private db: Database.Database;
@@ -32,9 +50,12 @@ export class PolicyEngine {
   /**
    * Evaluate a tool call request against all applicable policy rules.
    * Returns a PolicyDecision with the overall action.
+   *
+   * Policy evaluation is fail-closed: a rule exception or malformed argument
+   * payload becomes a denial rather than allowing execution because a safety
+   * or audit step malfunctioned.
    */
   evaluate(request: PolicyRequest): PolicyDecision {
-    const startTime = Date.now();
     const applicableRules = this.rules.filter((rule) =>
       this.ruleApplies(rule, request),
     );
@@ -47,7 +68,17 @@ export class PolicyEngine {
 
     for (const rule of applicableRules) {
       rulesEvaluated.push(rule.id);
-      const result = rule.evaluate(request);
+
+      let result;
+      try {
+        result = rule.evaluate(request);
+      } catch {
+        overallAction = "deny";
+        reasonCode = "POLICY_RULE_ERROR";
+        humanMessage = `Policy rule ${rule.id} failed during evaluation; action denied safely.`;
+        rulesTriggered.push(rule.id);
+        break;
+      }
 
       if (result === null) {
         continue;
@@ -69,9 +100,16 @@ export class PolicyEngine {
       }
     }
 
-    const argsHash = createHash("sha256")
-      .update(JSON.stringify(request.args))
-      .digest("hex");
+    const serializedArgs = serializePolicyArgs(request.args);
+    const argsHash = hashText(serializedArgs.serialized);
+    if (!serializedArgs.valid) {
+      overallAction = "deny";
+      reasonCode = "POLICY_ARGS_UNSERIALIZABLE";
+      humanMessage = "Tool arguments are not valid serializable JSON; action denied safely.";
+      if (!rulesTriggered.includes("policy.args_serialization")) {
+        rulesTriggered.push("policy.args_serialization");
+      }
+    }
 
     const authorityLevel = PolicyEngine.deriveAuthorityLevel(
       request.turnContext.inputSource,
@@ -113,7 +151,9 @@ export class PolicyEngine {
     try {
       insertPolicyDecision(this.db, row);
     } catch {
-      // Don't let logging failures block tool execution
+      // Don't let logging failures block tool execution.
+      // The policy decision itself has already been made; telemetry failure is
+      // intentionally isolated from authorization semantics.
     }
   }
 

@@ -50,7 +50,7 @@ describe("opportunity acquisition sources", () => {
         enabled: true,
         config: { labels: ["bounty"] },
       }),
-    ).toThrow(/requires at least one explicitly configured repository/i);
+    ).toThrow(/repositories must contain at least one|requires at least one explicitly configured repository/i);
     db.close();
   });
 });

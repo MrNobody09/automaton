@@ -8,6 +8,7 @@ import { getEncoding, type Tiktoken } from "js-tiktoken";
 import type { ChatMessage } from "../types.js";
 
 const MAX_TOKEN_CACHE_SIZE = 10_000;
+const MAX_EXACT_TOKENIZATION_CHARS = 64 * 1024;
 const DEFAULT_RESERVE_TOKENS = 4_096;
 const COMPRESSION_HEADROOM_RATIO = 0.1;
 const MAX_EVENT_CONTENT_CHARS = 220;
@@ -128,6 +129,13 @@ function formatCacheKey(text: string, model?: string): string {
   return `${model ?? "default"}::${text}`;
 }
 
+function estimateOversizedTokens(text: string): number {
+  // A byte can always be represented by at most one byte-fallback token. Using
+  // UTF-8 byte length therefore gives a bounded, deliberately conservative
+  // estimate without invoking the tokenizer on attacker-controlled giant text.
+  return Buffer.byteLength(text, "utf8");
+}
+
 export function createTokenCounter(): TokenCounter {
   const cache = new Map<string, number>();
   let encoder: Tiktoken | null = null;
@@ -140,8 +148,15 @@ export function createTokenCounter(): TokenCounter {
 
   const countTokens = (text: string, model?: string): number => {
     const normalizedText = text ?? "";
-    const key = formatCacheKey(normalizedText, model);
 
+    // Never exact-tokenize or cache arbitrarily large input. Apart from CPU
+    // cost, storing the complete text as a cache key would make the cache a
+    // memory-amplification surface.
+    if (normalizedText.length > MAX_EXACT_TOKENIZATION_CHARS) {
+      return estimateOversizedTokens(normalizedText);
+    }
+
+    const key = formatCacheKey(normalizedText, model);
     const cached = cache.get(key);
     if (cached !== undefined) {
       cache.delete(key);

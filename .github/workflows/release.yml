@@ -1,17 +1,82 @@
 name: Release
+run-name: Release · ${{ github.ref_name }} · sha=${{ github.sha }}
+
 on:
   push:
     tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  release:
+  release-validation:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify tag commit is contained in main
+        run: |
+          set -euo pipefail
+          git fetch https://github.com/${GITHUB_REPOSITORY}.git main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+          echo "Release tag commit $GITHUB_SHA is contained in main."
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node-version }}
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.0
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run validation:contract
+      - run: pnpm run typecheck
+      - run: pnpm run typecheck:tests
+      - run: pnpm run build
+      - run: pnpm run validation:artifacts
+      - name: Run complete process-isolated test suite
+        env:
+          TEST_FILE_TIMEOUT_MS: 120000
+        run: pnpm exec tsx scripts/run-isolated-tests.ts
+
+  security-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.0
       - run: pnpm install --frozen-lockfile
-      - run: pnpm run typecheck
-      - run: pnpm test
-      - run: pnpm run build
+      - run: pnpm audit --audit-level=high
+
+  required-release:
+    name: required-release
+    if: always()
+    needs:
+      - release-validation
+      - security-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require all authoritative release jobs
+        env:
+          RELEASE_VALIDATION_RESULT: ${{ needs.release-validation.result }}
+          SECURITY_AUDIT_RESULT: ${{ needs.security-audit.result }}
+        run: |
+          set -euo pipefail
+          printf 'release-validation=%s\nsecurity-audit=%s\n' \
+            "$RELEASE_VALIDATION_RESULT" \
+            "$SECURITY_AUDIT_RESULT"
+          test "$RELEASE_VALIDATION_RESULT" = "success"
+          test "$SECURITY_AUDIT_RESULT" = "success"

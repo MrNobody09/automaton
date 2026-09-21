@@ -19,6 +19,7 @@ import { createTokenCounter } from "../memory/context-manager.js";
 
 const MAX_CONTEXT_TURNS = 20;
 const SUMMARY_THRESHOLD = 15;
+const MAX_EXACT_TOKENIZATION_CHARS = 16_384;
 
 let tokenCounter: ReturnType<typeof createTokenCounter> | null = null;
 
@@ -29,26 +30,40 @@ export const MAX_TOOL_RESULT_SIZE = 10_000;
 export type { TokenBudget };
 export { DEFAULT_TOKEN_BUDGET };
 
+function conservativeTokenUpperBound(text: string): number {
+  return Buffer.byteLength(text, "utf8");
+}
+
 /**
  * Estimate token count from text length.
- * Conservative estimate: ~4 characters per token for English text.
+ *
+ * Exact tokenization is intentionally bounded. Tokenizing very large or
+ * adversarial strings can become disproportionately expensive. Oversized
+ * inputs therefore use a cheap conservative UTF-8 byte upper bound instead
+ * of an under-counting character heuristic.
  */
 export function estimateTokens(text: string): number {
   const content = text ?? "";
   const legacyEstimate = Math.ceil(content.length / 4);
+
+  if (content.length > MAX_EXACT_TOKENIZATION_CHARS) {
+    return conservativeTokenUpperBound(content);
+  }
+
   try {
     if (!tokenCounter) {
       tokenCounter = createTokenCounter();
     }
     const tokens = tokenCounter.countTokens(content);
     if (Number.isFinite(tokens) && tokens > 0) {
-      // Keep a conservative floor to avoid under-budgeting context.
+      // Keep the legacy floor for normal inputs; exact counting remains the
+      // primary estimate within the bounded tokenizer range.
       return Math.max(tokens, legacyEstimate);
     }
   } catch {
-    // Fallback to conservative character heuristic if token counter is unavailable.
+    return conservativeTokenUpperBound(content);
   }
-  return legacyEstimate;
+  return content.length === 0 ? 0 : conservativeTokenUpperBound(content);
 }
 
 /**
