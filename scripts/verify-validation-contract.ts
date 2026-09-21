@@ -50,11 +50,17 @@ function assertValidationCodeOwners(): void {
   const requiredEntries = [
     "/.github/workflows/ @MrNobody09",
     "/scripts/run-isolated-tests.ts @MrNobody09",
+    "/scripts/process-tree.ts @MrNobody09",
     "/scripts/test-discovery.ts @MrNobody09",
     "/scripts/validation-rules.ts @MrNobody09",
     "/scripts/verify-validation-contract.ts @MrNobody09",
     "/scripts/verify-package-artifacts.ts @MrNobody09",
+    "/test/process-tree.test.ts @MrNobody09",
+    "/test/shard-selection.test.ts @MrNobody09",
+    "/test/validation-rules.test.ts @MrNobody09",
     "/test/setup/network-guard.ts @MrNobody09",
+    "/src/__tests__/context-token-estimate-regression.test.ts @MrNobody09",
+    "/src/__tests__/policy-regression-audit.test.ts @MrNobody09",
     "/vitest.config.ts @MrNobody09",
     "/package.json @MrNobody09",
     "/pnpm-lock.yaml @MrNobody09",
@@ -144,7 +150,7 @@ try {
   }
 
   console.log(
-    `[validation-contract] PASS: ${realTests.length} repository test files exactly match Vitest discovery; validation controls are CODEOWNED; validation tooling is TypeScript-checked; four CI shards exactly partition discovery; workflow rules are parsed structurally and unit-tested; package scripts are unambiguous; no skipped/only/todo tests were found.`,
+    `[validation-contract] PASS: ${realTests.length} repository test files exactly match Vitest discovery; validation controls and their regression tests are CODEOWNED; validation tooling is TypeScript-checked; four CI shards exactly partition discovery; workflow rules are parsed structurally and unit-tested; package scripts are unambiguous; no skipped/only/todo tests were found.`,
   );
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error));
