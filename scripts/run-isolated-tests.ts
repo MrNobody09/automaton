@@ -2,9 +2,10 @@
 
 import { statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { discoverTestFiles, selectTestShard } from "./test-discovery.js";
+import { terminateProcessTree } from "./process-tree.js";
 
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const shardIndex = Number.parseInt(process.argv[2] ?? "1", 10);
@@ -42,31 +43,6 @@ try {
   fail("Vitest executable is unavailable. Run pnpm install first.");
 }
 
-function terminateProcessTree(child: ChildProcess): void {
-  if (!child.pid) return;
-
-  if (process.platform === "win32") {
-    spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
-      stdio: "ignore",
-      windowsHide: true,
-    });
-    return;
-  }
-
-  // Child processes are spawned as their own process group. Signalling the
-  // negative PID terminates Vitest together with workers/grandchildren instead
-  // of recreating the historical orphan-worker failure mode.
-  try {
-    process.kill(-child.pid, "SIGKILL");
-  } catch {
-    try {
-      child.kill("SIGKILL");
-    } catch {
-      // Process already exited.
-    }
-  }
-}
-
 function handleParentSignal(signal: NodeJS.Signals): void {
   if (shuttingDown) return;
   shuttingDown = true;
@@ -90,8 +66,8 @@ async function runTestFile(testFile: string): Promise<void> {
       cwd: repoRoot,
       env: { ...process.env, CI: process.env.CI ?? "true" },
       stdio: "inherit",
-      // On POSIX this creates a process group so timeout cleanup can kill the
-      // complete descendant tree. Windows uses taskkill /T instead.
+      // POSIX: create a process group so timeout cleanup can terminate Vitest
+      // and all inherited workers. Windows uses taskkill /T in the helper.
       detached: process.platform !== "win32",
       windowsHide: true,
     });
