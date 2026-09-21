@@ -119,6 +119,20 @@ export function validateCiWorkflow(workflow: WorkflowObject): void {
   if (!blockingCommandsForJob(contract).includes("pnpm run validation:contract")) fail("CI validation-contract job must execute pnpm run validation:contract.");
   const audit = workflow.jobs?.["security-audit"];
   if (!blockingCommandsForJob(audit).includes("pnpm audit --audit-level=high")) fail("CI security-audit must block on pnpm audit --audit-level=high.");
+
+  const required = workflow.jobs?.["required-ci"];
+  if (!required) fail("CI must define the stable required-ci aggregation job.");
+  if (required.if !== "always()") fail("CI required-ci must use if: always() so failures still reach the aggregator.");
+  const requiredNeeds = ["validation-contract", "build-and-typecheck", "isolated-full-suite", "security-audit"];
+  if (!sameScalarSet(required.needs, requiredNeeds)) fail("CI required-ci must depend on every authoritative CI job exactly once.");
+  const requiredCommands = blockingCommandsForJob(required);
+  if (requiredCommands.length !== 1 || !requiredCommands[0].includes('test "$VALIDATION_CONTRACT_RESULT" = "success"') ||
+      !requiredCommands[0].includes('test "$BUILD_AND_TYPECHECK_RESULT" = "success"') ||
+      !requiredCommands[0].includes('test "$ISOLATED_FULL_SUITE_RESULT" = "success"') ||
+      !requiredCommands[0].includes('test "$SECURITY_AUDIT_RESULT" = "success"')) {
+    fail("CI required-ci must block unless every authoritative CI dependency succeeds.");
+  }
+
   if (workflow.jobs?.["test-sensitivity"]) fail("CI must not use repository-mutating sensitivity tests as a blocking validation primitive.");
 }
 
