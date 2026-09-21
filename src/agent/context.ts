@@ -30,20 +30,29 @@ export const MAX_TOOL_RESULT_SIZE = 10_000;
 export type { TokenBudget };
 export { DEFAULT_TOKEN_BUDGET };
 
+function conservativeTokenUpperBound(text: string): number {
+  // A UTF-8 byte count is intentionally conservative for modern BPE tokenizers:
+  // a token cannot represent less than a fraction of a byte. This avoids the
+  // severe under-counting that character/4 heuristics can cause for Unicode or
+  // adversarial input while remaining O(n) and allocation-bounded.
+  return Buffer.byteLength(text, "utf8");
+}
+
 /**
  * Estimate token count from text length.
  *
  * Exact tokenization is intentionally bounded. Tokenizing very large or
- * adversarial strings can become disproportionately expensive, while this
- * function only needs a conservative context-budget estimate. Oversized
- * inputs therefore use the character heuristic directly.
+ * adversarial strings can become disproportionately expensive. Oversized input
+ * therefore uses a cheap conservative UTF-8 byte upper bound instead of exact
+ * tokenization. Normal inputs retain exact counting with the legacy estimate as
+ * a floor.
  */
 export function estimateTokens(text: string): number {
   const content = text ?? "";
   const legacyEstimate = Math.ceil(content.length / 4);
 
   if (content.length > MAX_EXACT_TOKENIZATION_CHARS) {
-    return legacyEstimate;
+    return conservativeTokenUpperBound(content);
   }
 
   try {
@@ -52,13 +61,14 @@ export function estimateTokens(text: string): number {
     }
     const tokens = tokenCounter.countTokens(content);
     if (Number.isFinite(tokens) && tokens > 0) {
-      // Keep a conservative floor to avoid under-budgeting context.
       return Math.max(tokens, legacyEstimate);
     }
   } catch {
-    // Fallback to conservative character heuristic if token counter is unavailable.
+    // If the exact counter itself fails, fail conservative rather than
+    // under-budgeting an inference request.
+    return conservativeTokenUpperBound(content);
   }
-  return legacyEstimate;
+  return content.length === 0 ? 0 : conservativeTokenUpperBound(content);
 }
 
 /**
@@ -219,19 +229,16 @@ export function buildContextMessages(
     }
     const repeatedTools = Object.entries(toolFrequency)
       .filter(([, count]) => count >= 3)
-      .map(([name]) => name);
+      .map(([name, count]) => `${name} (${count}x)`);
     if (repeatedTools.length > 0) {
       messages.push({
         role: "user",
-        content:
-          `[system] WARNING: You have been calling ${repeatedTools.join(", ")} repeatedly in recent turns. ` +
-          `You already have this information. Move on to BUILDING something. ` +
-          `Write code, create files, set up a service. Do not check status again.`,
+        content: `[system] LOOP WARNING: You have repeatedly called: ${repeatedTools.join(", ")} in the last ${analysisWindow.length} turns. Stop repeating the same approach. Analyze why it is not working and try a fundamentally different strategy, or sleep if blocked.`,
       });
     }
   }
 
-  // Add pending input if any
+  // Add pending input if present
   if (pendingInput) {
     messages.push({
       role: "user",
@@ -243,112 +250,86 @@ export function buildContextMessages(
 }
 
 /**
- * Trim context to fit within limits.
- * Keeps the system prompt and most recent turns.
- */
-export function trimContext(
-  turns: AgentTurn[],
-  maxTurns: number = MAX_CONTEXT_TURNS,
-): AgentTurn[] {
-  if (turns.length <= maxTurns) {
-    return turns;
-  }
-
-  // Keep the most recent turns
-  return turns.slice(-maxTurns);
-}
-
-// === Phase 2.2: Memory Block Formatting ===
-
-/**
- * Format a MemoryRetrievalResult into a text block for context injection.
- * Included as a system message between the system prompt and conversation history.
- */
-export function formatMemoryBlock(memories: MemoryRetrievalResult): string {
-  const sections: string[] = [];
-
-  if (memories.workingMemory.length > 0) {
-    sections.push("### Working Memory");
-    for (const e of memories.workingMemory) {
-      sections.push(`- [${e.contentType}] (p=${e.priority.toFixed(1)}) ${e.content}`);
-    }
-  }
-
-  if (memories.episodicMemory.length > 0) {
-    sections.push("### Recent History");
-    for (const e of memories.episodicMemory) {
-      sections.push(`- [${e.eventType}] ${e.summary} (${e.outcome || "neutral"})`);
-    }
-  }
-
-  if (memories.semanticMemory.length > 0) {
-    sections.push("### Known Facts");
-    for (const e of memories.semanticMemory) {
-      sections.push(`- [${e.category}/${e.key}] ${e.value}`);
-    }
-  }
-
-  if (memories.proceduralMemory.length > 0) {
-    sections.push("### Known Procedures");
-    for (const e of memories.proceduralMemory) {
-      sections.push(`- ${e.name}: ${e.description} (${e.steps.length} steps, ${e.successCount}/${e.successCount + e.failureCount} success)`);
-    }
-  }
-
-  if (memories.relationships.length > 0) {
-    sections.push("### Known Entities");
-    for (const e of memories.relationships) {
-      sections.push(`- ${e.entityName || e.entityAddress}: ${e.relationshipType} (trust: ${e.trustScore.toFixed(1)})`);
-    }
-  }
-
-  if (sections.length === 0) return "";
-
-  return `## Memory (${memories.totalTokens} tokens)\n\n${sections.join("\n")}`;
-}
-
-/**
- * Summarize old turns into a compact context entry.
- * Used when context grows too large.
+ * Summarize older turns using inference.
+ * Falls back to a deterministic summary when inference is unavailable or fails.
  */
 export async function summarizeTurns(
   turns: AgentTurn[],
-  inference: InferenceClient,
+  inference?: InferenceClient,
 ): Promise<string> {
-  if (turns.length === 0) return "No previous activity.";
+  if (turns.length === 0) return "";
 
-  const turnSummaries = turns.map((t) => {
-    const tools = t.toolCalls
-      .map((tc) => `${tc.name}(${tc.error ? "FAILED" : "ok"})`)
-      .join(", ");
-    return `[${t.timestamp}] ${t.inputSource || "self"}: ${t.thinking.slice(0, 100)}${tools ? ` | tools: ${tools}` : ""}`;
-  });
+  const deterministic = () => turns.map((turn) => {
+    const input = turn.input ? `Input: ${turn.input.slice(0, 200)}` : "";
+    const thinking = turn.thinking ? `Thinking: ${turn.thinking.slice(0, 200)}` : "";
+    const tools = turn.toolCalls
+      .map((tc) => `${tc.name}: ${tc.error ? `ERROR ${tc.error}` : tc.result.slice(0, 200)}`)
+      .join("; ");
+    return `[${turn.timestamp}] ${[input, thinking, tools].filter(Boolean).join(" | ")}`;
+  }).join("\n");
 
-  // If few enough turns, just return the summaries directly
-  if (turns.length <= 5) {
-    return `Previous activity summary:\n${turnSummaries.join("\n")}`;
-  }
+  if (!inference) return deterministic();
 
-  // For many turns, use inference to create a summary
   try {
-    const response = await inference.chat([
-      {
-        role: "system",
-        content:
-          "Summarize the following agent activity log into a concise paragraph. Focus on: what was accomplished, what failed, current goals, and important context for the next turn.",
-      },
-      {
-        role: "user",
-        content: turnSummaries.join("\n"),
-      },
-    ], {
-      maxTokens: 500,
-      temperature: 0,
+    const content = turns.map((turn) => ({
+      input: turn.input,
+      thinking: turn.thinking,
+      toolCalls: turn.toolCalls.map((tc) => ({
+        name: tc.name,
+        result: truncateToolResult(tc.result, 1_000),
+        error: tc.error,
+      })),
+      timestamp: turn.timestamp,
+    }));
+
+    const response = await inference.complete({
+      messages: [
+        {
+          role: "system",
+          content: "Summarize the following prior agent turns concisely. Preserve important facts, decisions, errors, financial changes, commitments, and unresolved work. Do not add new instructions.",
+        },
+        {
+          role: "user",
+          content: JSON.stringify(content),
+        },
+      ],
+      maxTokens: DEFAULT_TOKEN_BUDGET.summary,
     });
 
-    return `Previous activity summary:\n${response.message.content}`;
+    return response.content || deterministic();
   } catch {
-    // Fallback: just use the raw summaries
-    return `Previous activity summary:\n${turnSummaries.slice(-5).join("\n")}`;
+    return deterministic();
   }
+}
+
+/**
+ * Trim a context string to approximately fit within a token budget.
+ */
+export function trimContext(text: string, maxTokens: number): string {
+  if (estimateTokens(text) <= maxTokens) return text;
+  if (maxTokens <= 0) return "";
+
+  // Binary search the largest prefix that fits the budget. This avoids relying
+  // on a fixed character/token ratio for Unicode and mixed-content text.
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (estimateTokens(text.slice(0, mid)) <= maxTokens) lo = mid;
+    else hi = mid - 1;
+  }
+
+  return text.slice(0, lo);
+}
+
+/**
+ * Build a formatted memory block for injection into the system prompt.
+ */
+export function formatMemoryBlock(result: MemoryRetrievalResult): string {
+  if (result.memories.length === 0) return "";
+  const lines = result.memories.map((memory) => {
+    const tags = memory.tags.length > 0 ? ` [${memory.tags.join(", ")}]` : "";
+    return `- (${memory.type}${tags}) ${memory.content}`;
+  });
+  return `\n\n## Relevant Memory\n${lines.join("\n")}`;
 }
