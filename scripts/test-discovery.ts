@@ -3,7 +3,18 @@
 import path from "node:path";
 import { createVitest } from "vitest/node";
 
-function normalizeRelative(repoRoot, filePath) {
+export interface VitestProjectTopology {
+  name: string;
+  allowOnly: boolean | undefined;
+  setupFiles: string[];
+}
+
+export interface VitestTopology {
+  files: string[];
+  projects: VitestProjectTopology[];
+}
+
+function normalizeRelative(repoRoot: string, filePath: string): string {
   const absolute = path.resolve(filePath);
   const relative = path.relative(repoRoot, absolute).replaceAll("\\", "/");
   if (!relative || relative === "." || relative.startsWith("../") || path.isAbsolute(relative)) {
@@ -12,8 +23,11 @@ function normalizeRelative(repoRoot, filePath) {
   return relative;
 }
 
-export function selectTestShard(files, shardIndex, shardTotal) {
-  if (!Array.isArray(files)) throw new TypeError("files must be an array");
+export function selectTestShard(
+  files: readonly string[],
+  shardIndex: number,
+  shardTotal: number,
+): string[] {
   if (!Number.isInteger(shardIndex) || !Number.isInteger(shardTotal)) {
     throw new TypeError("Shard index and shard total must be integers.");
   }
@@ -23,7 +37,7 @@ export function selectTestShard(files, shardIndex, shardTotal) {
   return files.filter((_, index) => index % shardTotal === shardIndex - 1);
 }
 
-export async function inspectVitestTopology(repoRoot) {
+export async function inspectVitestTopology(repoRoot: string): Promise<VitestTopology> {
   const vitest = await createVitest(
     "test",
     { watch: false, run: false },
@@ -31,8 +45,8 @@ export async function inspectVitestTopology(repoRoot) {
   );
 
   try {
-    const discovered = [];
-    const projects = [];
+    const discovered: string[] = [];
+    const projects: VitestProjectTopology[] = [];
 
     for (const project of vitest.projects) {
       const { testFiles } = await project.globTestFiles();
@@ -58,6 +72,6 @@ export async function inspectVitestTopology(repoRoot) {
   }
 }
 
-export async function discoverTestFiles(repoRoot) {
+export async function discoverTestFiles(repoRoot: string): Promise<string[]> {
   return (await inspectVitestTopology(repoRoot)).files;
 }

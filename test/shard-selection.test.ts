@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { selectTestShard } from "../scripts/test-discovery.mjs";
+import { selectTestShard } from "../scripts/test-discovery.js";
 
 describe("selectTestShard", () => {
   it("partitions a file list exactly once across four shards", () => {
