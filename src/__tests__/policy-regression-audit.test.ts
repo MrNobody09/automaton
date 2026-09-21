@@ -50,6 +50,63 @@ describe("retroactive policy regression audit", () => {
     });
   });
 
+  it("automatically treats new non-safe financial tools as spending-sensitive", () => {
+    const spendingRule = createOwnerControlRules()[0];
+    const result = spendingRule.evaluate(request({
+      tool: {
+        name: "future_financial_action",
+        description: "future financial action",
+        category: "financial",
+        riskLevel: "caution",
+        parameters: {},
+        execute: async () => "ok",
+      },
+      args: { amount: 10 },
+    }));
+
+    expect(result).toMatchObject({
+      action: "deny",
+      reasonCode: "OWNER_CONTROL_STATE_UNAVAILABLE",
+    });
+  });
+
+  it("keeps safe financial read-only tools outside the spending pause", () => {
+    const spendingRule = createOwnerControlRules()[0];
+    const result = spendingRule.evaluate(request({
+      tool: {
+        name: "check_balance",
+        description: "read-only balance check",
+        category: "financial",
+        riskLevel: "safe",
+        parameters: {},
+        execute: async () => "ok",
+      },
+      args: {},
+    }));
+
+    expect(result).toBeNull();
+  });
+
+  it("classifies known non-financial capital actions as spending-sensitive", () => {
+    const spendingRule = createOwnerControlRules()[0];
+    const result = spendingRule.evaluate(request({
+      tool: {
+        name: "create_sandbox",
+        description: "create paid compute sandbox",
+        category: "conway",
+        riskLevel: "caution",
+        parameters: {},
+        execute: async () => "ok",
+      },
+      args: { vcpu: 1 },
+    }));
+
+    expect(result).toMatchObject({
+      action: "deny",
+      reasonCode: "OWNER_CONTROL_STATE_UNAVAILABLE",
+    });
+  });
+
   it("policy engine fails closed if an applicable rule throws", () => {
     const db = new Database(":memory:");
     const throwingRule: PolicyRule = {
