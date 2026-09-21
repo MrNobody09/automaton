@@ -96,3 +96,34 @@ jobs:
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.0
       - run: pnpm install --frozen-lockfile
       - run: pnpm audit --audit-level=high
+
+  required-ci:
+    name: required-ci
+    if: always()
+    needs:
+      - validation-contract
+      - build-and-typecheck
+      - isolated-full-suite
+      - security-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Require all authoritative CI jobs
+        env:
+          VALIDATION_CONTRACT_RESULT: ${{ needs.validation-contract.result }}
+          BUILD_AND_TYPECHECK_RESULT: ${{ needs.build-and-typecheck.result }}
+          ISOLATED_FULL_SUITE_RESULT: ${{ needs.isolated-full-suite.result }}
+          SECURITY_AUDIT_RESULT: ${{ needs.security-audit.result }}
+        run: |
+          set -euo pipefail
+          printf 'validation-contract=%s\nbuild-and-typecheck=%s\nisolated-full-suite=%s\nsecurity-audit=%s\n' \
+            "$VALIDATION_CONTRACT_RESULT" \
+            "$BUILD_AND_TYPECHECK_RESULT" \
+            "$ISOLATED_FULL_SUITE_RESULT" \
+            "$SECURITY_AUDIT_RESULT"
+          test "$VALIDATION_CONTRACT_RESULT" = "success"
+          test "$BUILD_AND_TYPECHECK_RESULT" = "success"
+          test "$ISOLATED_FULL_SUITE_RESULT" = "success"
+          test "$SECURITY_AUDIT_RESULT" = "success"
