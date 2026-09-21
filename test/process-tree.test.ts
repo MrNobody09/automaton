@@ -8,16 +8,25 @@ import { terminateProcessTree } from "../scripts/process-tree.js";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-describe("terminateProcessTree", () => {
-  it("prevents a spawned grandchild from surviving parent-tree termination", async () => {
-    const tempDir = await mkdtemp(path.join(os.tmpdir(), "automaton-process-tree-"));
-    const marker = path.join(tempDir, "grandchild-survived.txt");
+async function waitForFile(filePath: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(filePath)) return true;
+    await sleep(25);
+  }
+  return existsSync(filePath);
+}
 
-    // The parent launches a grandchild that would create a marker after 900ms.
-    // We kill the parent's complete process tree well before that deadline. If
-    // cleanup only kills the immediate parent, the marker appears and the test
-    // fails, reproducing the class of orphan-worker bug seen in historical CI.
-    const grandchildScript = `setTimeout(() => require('fs').writeFileSync(${JSON.stringify(marker)}, 'survived'), 900); setTimeout(() => {}, 5000);`;
+describe("terminateProcessTree", () => {
+  it("prevents an already-started grandchild from surviving parent-tree termination", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "automaton-process-tree-"));
+    const readyMarker = path.join(tempDir, "grandchild-ready.txt");
+    const survivalMarker = path.join(tempDir, "grandchild-survived.txt");
+
+    // The grandchild first proves that it is alive, then waits before writing a
+    // survival marker. We do not kill the tree until the ready marker exists;
+    // this prevents a false pass where the grandchild simply never started.
+    const grandchildScript = `const fs = require('fs'); fs.writeFileSync(${JSON.stringify(readyMarker)}, 'ready'); setTimeout(() => fs.writeFileSync(${JSON.stringify(survivalMarker)}, 'survived'), 900); setTimeout(() => {}, 5000);`;
     const parentScript = `const { spawn } = require('child_process'); spawn(process.execPath, ['-e', ${JSON.stringify(grandchildScript)}], { stdio: 'ignore' }); setTimeout(() => {}, 5000);`;
 
     const child = spawn(process.execPath, ["-e", parentScript], {
@@ -27,13 +36,13 @@ describe("terminateProcessTree", () => {
     });
 
     try {
-      await sleep(150);
+      expect(await waitForFile(readyMarker, 2_000)).toBe(true);
       terminateProcessTree(child);
       await sleep(1_100);
-      expect(existsSync(marker)).toBe(false);
+      expect(existsSync(survivalMarker)).toBe(false);
     } finally {
       terminateProcessTree(child);
       await rm(tempDir, { recursive: true, force: true });
     }
-  }, 5_000);
+  }, 6_000);
 });
